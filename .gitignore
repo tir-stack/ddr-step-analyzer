@@ -1,0 +1,25 @@
+# 依賴與環境（可重建；正式環境在 %LOCALAPPDATA%\ddr-pose\venv）
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 分析資料與產物（影片、骨架、結果都可由程式重建）
+data/
+dist/
+
+# 暫存與工具產物
+.playwright-mcp/
+*.log
+.DS_Store
+Thumbs.db
+
+# 大型二進位
+*.mp4
+*.mov
+*.MOV
+*.zip
+
+# 秘密
+.env
+*credentials*

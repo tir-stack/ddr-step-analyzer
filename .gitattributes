@@ -1,0 +1,4 @@
+# Windows 腳本必須是 CRLF（PowerShell 5.1／cmd），不要被轉成 LF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.txt text eol=crlf

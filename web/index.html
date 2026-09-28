@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DDR ステップ解析</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="offline" hidden data-i18n="offline">伺服器已停止。請重新執行 start.bat。</div>
+<header>
+  <h1 data-i18n="app.title">DDR 踩點分析</h1>
+  <select id="videoSel" data-i18n-aria="sel.aria"></select>
+  <span id="badges"></span>
+  <span class="spacer"></span>
+  <select id="langSel" aria-label="Language">
+    <option value="ja">日本語</option>
+    <option value="zh">中文</option>
+  </select>
+  <button id="addBtn" data-i18n="add.btn">＋ 新增影片</button>
+</header>
+
+<main id="main">
+  <section id="left">
+    <div id="stage">
+      <div id="zoomwrap">
+        <video id="video" playsinline preload="auto"></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div id="calibBar" hidden>
+        <span id="calibHint" data-i18n-html="calib.hint"></span>
+        <button id="calibClick" data-i18n="calib.clickBtn">點選對應點</button>
+        <button id="calibPickDone" class="primary" hidden></button>
+        <button id="calibRotate" data-i18n="calib.rotate">旋轉 90°</button>
+        <button id="calibApply" class="primary" data-i18n="calib.apply">套用</button>
+        <button id="calibReset" data-i18n="calib.reset">重設為自動</button>
+        <button id="calibCancel" data-i18n="calib.cancel">取消</button>
+      </div>
+      <div id="empty" data-i18n="empty">選擇或新增一支影片</div>
+    </div>
+    <div id="controls">
+      <button id="playBtn" data-i18n-title="ctl.play">▶</button>
+      <button id="prevF" data-i18n-title="ctl.prev">⏮</button>
+      <button id="nextF" data-i18n-title="ctl.next">⏭</button>
+      <input id="seek" type="range" min="0" max="1000" value="0" data-i18n-aria="ctl.seek">
+      <span id="timeLbl">0:00.00</span>
+      <select id="rate" data-i18n-aria="ctl.rate">
+        <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+      </select>
+      <label><input type="checkbox" data-layer="skel" checked><span data-i18n="layer.skel">骨架</span></label>
+      <label><input type="checkbox" data-layer="com" checked><span data-i18n="layer.com">重心</span></label>
+      <label><input type="checkbox" data-layer="grid" checked><span data-i18n="layer.grid">踏板格線</span></label>
+      <label><input type="checkbox" data-layer="feet" checked><span data-i18n="layer.feet">落地點</span></label>
+      <button id="calibBtn" data-i18n="calib.btn">校正踏板</button>
+    </div>
+    <div id="chartsHead">
+      <span data-i18n="charts.title">時間軸</span>
+      <label><input type="radio" name="win" value="8" checked><span data-i18n="win.8">前後 4 秒</span></label>
+      <label><input type="radio" name="win" value="30"><span data-i18n="win.30">30 秒</span></label>
+      <label><input type="radio" name="win" value="0"><span data-i18n="win.all">全部</span></label>
+      <span class="hint" data-i18n="charts.hint">點圖可跳到該時間</span>
+    </div>
+    <canvas id="charts"></canvas>
+  </section>
+
+  <aside id="right">
+    <div class="card">
+      <div class="cardHead">
+        <h2 data-i18n="pad.title">俯視踏板</h2>
+        <label><input type="checkbox" id="showAll" checked><span data-i18n="pad.showAll">顯示全部落點</span></label>
+      </div>
+      <canvas id="pad"></canvas>
+      <div id="padLegend">
+        <span><i style="background:var(--L)"></i><span data-i18n="lg.L">左腳</span></span>
+        <span><i style="background:var(--R)"></i><span data-i18n="lg.R">右腳</span></span>
+        <span><i class="ring"></i><span data-i18n="lg.now">目前落地</span></span>
+        <span><i style="background:var(--com)"></i><span data-i18n="lg.com">重心</span></span>
+        <span data-i18n="lg.heelUp">虛線腳跟＝腳跟離地</span>
+      </div>
+      <div id="evSel" hidden><span id="evSelLbl"></span> <button id="evClear" data-i18n="ev.clear">清除選取</button></div>
+      <div id="nowInfo"></div>
+    </div>
+    <div class="card">
+      <div class="tabs">
+        <button data-tab="advice" class="on" data-i18n="tab.advice">修正建議</button>
+        <button data-tab="events" data-i18n="tab.events">重心事件</button>
+        <button data-tab="steps" data-i18n="tab.steps">落點</button>
+        <button data-tab="metrics" data-i18n="tab.metrics">指標</button>
+      </div>
+      <div id="tab-advice" class="tab"></div>
+      <div id="tab-events" class="tab" hidden></div>
+      <div id="tab-steps" class="tab" hidden></div>
+      <div id="tab-metrics" class="tab" hidden></div>
+    </div>
+  </aside>
+</main>
+
+<dialog id="addDlg">
+  <form method="dialog" id="addForm">
+    <h2 data-i18n="dlg.title">新增影片</h2>
+    <label><span data-i18n="dlg.path">本機路徑</span><input id="addPath" placeholder="D:\iCloud Videos_20251107\IMG_1195.MOV"></label>
+    <div class="or" data-i18n="dlg.or">或</div>
+    <label><span data-i18n="dlg.file">上傳檔案</span><input id="addFile" type="file" accept="video/*,.mov,.mp4"></label>
+    <label><span data-i18n="dlg.q">辨識品質</span>
+      <select id="addQ">
+        <option value="accurate" data-i18n="dlg.q.acc">準確（約 0.3 秒／幀）</option>
+        <option value="fast" data-i18n="dlg.q.fast">快速（約 0.03 秒／幀，遮擋時較易左右腳混淆）</option>
+      </select>
+    </label>
+    <p class="hint" data-i18n="dlg.hint">拍攝建議</p>
+    <div class="row"><button value="cancel" data-i18n="dlg.cancel">取消</button><button id="addGo" class="primary" value="ok" data-i18n="dlg.go">開始分析</button></div>
+    <p id="addErr" class="err"></p>
+  </form>
+</dialog>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

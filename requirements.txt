@@ -1,0 +1,11 @@
+# 已在 Python 3.12 / 3.13（Windows 64-bit）測試的版本。
+# rtmlib 另外以 --no-deps 安裝（它同時依賴 opencv-python 與 opencv-contrib-python，會互相覆蓋；只用 contrib 版）。
+numpy==2.3.2
+scipy==1.17.1
+opencv-contrib-python==5.0.0.93
+onnxruntime==1.26.0
+tqdm==4.68.1
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32
+imageio-ffmpeg==0.6.0
