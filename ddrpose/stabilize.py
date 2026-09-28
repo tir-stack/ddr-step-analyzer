@@ -1,9 +1,16 @@
-"""鏡頭晃動補償：每幀相對參考幀的單應矩陣（以背景特徵點估計，排除玩家）。
+"""鏡頭移動補償：原則上鏡頭固定，只有真的移動不少時才換一組單應矩陣（分段常數）。
+
+每 KEY_SEC 秒取一個關鍵幀，用背景特徵點（排除玩家）對參考幀估單應矩陣。
+逐幀估計會把遊戲畫面、毛巾、人的動作誤當成鏡頭晃動，讓九宮格跟著抖，所以不逐幀補償：
+相鄰關鍵幀的估計差距小於 MOVE_FRAC（畫面寬）就視為沒動；超過且下一個關鍵幀也確認，才切換新的一段。
 
 輸出 data/<vid>/motion.npz：
   M    (N,3,3)  原始解析度下，第 t 幀座標 → 參考幀座標
   ref  ()       參考幀索引
   inl  (N,)     關鍵幀的 RANSAC 內點數（非關鍵幀為 0）
+  ok   (N,)     該幀附近的關鍵幀有對上參考幀（False＝鏡頭拍到別處，例如拿起手機拍結算畫面）
+  seg  (N,)     鏡頭位置分段編號
+  ver  ()       格式版本
 """
 from __future__ import annotations
 
@@ -12,7 +19,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-KEY_EVERY = 5
+VERSION = 2
+KEY_SEC = 2.5       # 每幾秒檢查一次鏡頭位置
+MOVE_FRAC = 0.03    # 估計位移超過畫面寬的 3% 才算鏡頭真的移動
+MIN_INLIERS = 60
 
 
 def _person_mask(shape, kp, sc, scale):
@@ -27,17 +37,28 @@ def _person_mask(shape, kp, sc, scale):
     return m
 
 
+def _disp(A, B, probes):
+    """兩個單應矩陣把同一組點送到的位置平均差多少像素。"""
+    pa = probes @ A.T; pb = probes @ B.T
+    return float(np.mean(np.linalg.norm(pa[:, :2] / pa[:, 2:] - pb[:, :2] / pb[:, 2:], axis=1)))
+
+
 def compute_motion(vid_dir: str | Path, orig_w: int):
     vid_dir = Path(vid_dir)
     z = np.load(vid_dir / 'pose.npz')
-    K, Sc, n = z['kpts'], z['scores'], len(z['t'])
+    K, Sc, n, valid = z['kpts'], z['scores'], len(z['t']), z['valid']
+    fps = 1.0 / np.median(np.diff(z['t'])) if n > 1 else 30.0
+    step = max(1, int(round(KEY_SEC * fps)))
     cap = cv2.VideoCapture(str(vid_dir / 'preview.mp4'))
     pw = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or orig_w
+    ph = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or pw
     scale = orig_w / pw                      # 預覽 → 原始
     orb = cv2.ORB_create(2500, fastThreshold=12)
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-    ref = n // 2
+    # 參考幀：影片中間（手動校正的點存在參考幀座標，不要隨意改）；中間沒抓到人才改用有人的幀的中間
+    vi = np.where(valid)[0]
+    ref = n // 2 if valid[n // 2] or not len(vi) else int(vi[len(vi) // 2])
     cap.set(cv2.CAP_PROP_POS_FRAMES, ref)
     ok, fr = cap.read()
     if not ok:
@@ -48,48 +69,60 @@ def compute_motion(vid_dir: str | Path, orig_w: int):
         return None
     pr = np.float32([k.pt for k in kr])
 
-    keys, Ms, inls = [], [], []
-    prev = None                              # (關鍵點, 描述子, 該幀→參考)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    for i in range(n):
+    keys = sorted(set(range(0, n, step)) | {ref, n - 1})
+    Ms, inls = [], []
+    for i in keys:
+        if i == ref:
+            Ms.append(np.eye(3)); inls.append(len(kr)); continue
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ok, fr = cap.read()
-        if not ok:
-            break
-        if i % KEY_EVERY and i != n - 1:
-            continue
-        g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-        kc, dc = orb.detectAndCompute(g, _person_mask(g.shape, K[i], Sc[i], scale))
         M, ni = None, 0
-        if dc is not None and len(kc) >= 30:
-            pc = np.float32([k.pt for k in kc])
-            mt = bf.match(dc, dr)
-            if len(mt) >= 30:
-                M, inl = cv2.findHomography(pc[[m.queryIdx for m in mt]], pr[[m.trainIdx for m in mt]],
-                                            cv2.RANSAC, 3.0)
-                ni = int(inl.sum()) if M is not None else 0
-            if (M is None or ni < 60) and prev is not None and prev[1] is not None:
-                # 直接對參考幀配不起來 → 先對上一個關鍵幀，再串接
-                mt = bf.match(dc, prev[1])
+        if ok:
+            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+            kc, dc = orb.detectAndCompute(g, _person_mask(g.shape, K[i], Sc[i], scale))
+            if dc is not None and len(kc) >= 30:
+                pc = np.float32([k.pt for k in kc])
+                mt = bf.match(dc, dr)
                 if len(mt) >= 30:
-                    M2, inl2 = cv2.findHomography(pc[[m.queryIdx for m in mt]],
-                                                  prev[0][[m.trainIdx for m in mt]], cv2.RANSAC, 3.0)
-                    if M2 is not None and inl2.sum() >= 40:
-                        M, ni = prev[2] @ M2, int(inl2.sum())
-            prev = (pc, dc, M if M is not None else (prev[2] if prev else np.eye(3)))
-        if M is None:
-            M = Ms[-1] if Ms else np.eye(3)
-        keys.append(i); Ms.append(M / M[2, 2]); inls.append(ni)
+                    M, inl = cv2.findHomography(pc[[m.queryIdx for m in mt]], pr[[m.trainIdx for m in mt]],
+                                                cv2.RANSAC, 3.0)
+                    ni = int(inl.sum()) if M is not None else 0
+        Ms.append(M / M[2, 2] if M is not None and ni >= MIN_INLIERS else None); inls.append(ni)
     cap.release()
 
-    keys = np.array(keys); Ms = np.array(Ms)
-    Mall = np.empty((n, 3, 3))
-    for a in range(3):
-        for b in range(3):
-            Mall[:, a, b] = np.interp(np.arange(n), keys, Ms[:, a, b])
+    # 分段：鏡頭原則上固定；估計位移超過門檻、且下一個有效關鍵幀也確認，才開新的一段
+    probes = np.array([[x * pw, y * ph, 1.0] for x in (0.2, 0.5, 0.8) for y in (0.3, 0.6, 0.9)])
+    thr = MOVE_FRAC * pw
+    good = [k for k, M in enumerate(Ms) if M is not None]
+    seg_of = {}
+    segs = []                                # 每段的關鍵幀（keys 的索引）
+    for j, k in enumerate(good):
+        if not segs:
+            segs.append([k]); seg_of[k] = 0; continue
+        hold = np.median([Ms[q] for q in segs[-1]], 0)
+        if _disp(Ms[k], hold, probes) > thr:
+            nxt = good[j + 1] if j + 1 < len(good) else None
+            if nxt is None or _disp(Ms[nxt], hold, probes) > thr:
+                segs.append([k]); seg_of[k] = len(segs) - 1; continue
+            continue                         # 單一關鍵幀估錯：忽略
+        segs[-1].append(k); seg_of[k] = len(segs) - 1
+    ref_k = keys.index(ref)
+    Hs = [np.eye(3) if ref_k in s else np.median([Ms[q] for q in s], 0) for s in segs]
+
+    # 每幀套用所屬段的矩陣；段與段在關鍵幀處切換
+    Mall = np.tile(np.eye(3), (n, 1, 1)); seg = np.zeros(n, int); okf = np.zeros(n, bool)
+    starts = [keys[s[0]] for s in segs]
+    for si, H in enumerate(Hs):
+        a = 0 if si == 0 else starts[si]
+        b = starts[si + 1] if si + 1 < len(segs) else n
+        Mall[a:b] = H; seg[a:b] = si
+    for k, i in enumerate(keys):             # 關鍵幀有對上（且沒被當成估錯忽略）的附近才算 ok
+        if k in seg_of:
+            okf[max(0, i - step // 2):i + step // 2 + 1] = True
     S = np.diag([scale, scale, 1.0]); Si = np.diag([1 / scale, 1 / scale, 1.0])
     Mall = S @ Mall @ Si                     # 換到原始解析度座標
     inl_all = np.zeros(n, int); inl_all[keys] = inls
-    np.savez_compressed(vid_dir / 'motion.npz', M=Mall, ref=ref, inl=inl_all)
+    np.savez_compressed(vid_dir / 'motion.npz', M=Mall, ref=ref, inl=inl_all, ok=okf, seg=seg, ver=VERSION)
     return Mall, ref
 
 

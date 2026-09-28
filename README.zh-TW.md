@@ -6,9 +6,11 @@
 
 完全在本機執行：不需要 AI 訂閱、不呼叫任何雲端 API，影片不會離開這台電腦。只有第一次安裝時需要網路（套件與模型下載）。
 
+![分析畫面](docs/images/screen.png)
+
 ## 下載與安裝（Windows）
 
-1. 打開 [Releases 頁面](https://github.com/xkamome/ddr-step-analyzer/releases/latest)，下載 `ddr-step-analyzer_YYYYMMDD.zip`。
+1. 打開 [Releases 頁面](https://github.com/xkamome/ddr-step-analyzer/releases/latest)，下載 `ddr-step-analyzer_v1.2.zip` 這類名稱的 zip（數字是版本）。
    （也可以按本頁綠色的「Code」→「Download ZIP」，內容相同）
 2. zip 按右鍵 →「解壓縮全部」，建議放在 `C:\ddr-step-analyzer`（避開桌面與 OneDrive 資料夾）。
 3. 雙擊資料夾裡的 `setup.bat`。出現藍色「Windows 已保護您的電腦」時，按「其他資訊」→「仍要執行」。
@@ -36,8 +38,8 @@ CPU 上「準確」模式約 0.3 秒／幀，2 分鐘的影片約 20 分鐘。
 
 ## 移植到別台電腦（給別人用）
 
-1. 雙擊 `make_package.bat` → 產生 `dist/ddr-step-analyzer_YYYYMMDD.zip`（約 80 KB，只有程式與說明）。
-   發佈新版：`gh release create vX.Y dist/ddr-step-analyzer_YYYYMMDD.zip`，使用者從 Releases 頁面下載。
+1. 雙擊 `make_package.bat` → 產生 `dist/ddr-step-analyzer_v<版本>.zip`（約 100 KB，只有程式與說明；版本在 `ddrpose/__init__.py`）。
+   發佈新版：改 `__version__` → 打包 → `gh release create vX.Y dist/ddr-step-analyzer_vX.Y.zip`，使用者從 Releases 頁面下載。
 2. 把 zip 傳給對方。對方照 zip 裡的 `はじめにお読みください.txt`（日文）操作：
    - 解壓到 `C:\ddr-step-analyzer`（避開 OneDrive 同步資料夾）→ 雙擊 `setup.bat`。
    - `setup.bat` 會自動：找 Python 3.11–3.13，沒有就用 winget 或官方安裝檔裝 Python 3.12（使用者權限，不需管理員）→
@@ -58,7 +60,8 @@ python -m ddrpose.analyze data\IMG_1194                          # 分析（改�
 
 1. **姿勢**：YOLOX 偵測人框（每 10 幀）＋ RTMPose-x 逐幀辨識 26 點，追蹤主要玩家。
 2. **左右腳校正**：Viterbi 讓左右腳標籤在時間上連續，再用踏板幾何（或側拍時腳的遠近大小）檢查整體是否左右顛倒。
-3. **鏡頭晃動補償**：用背景特徵點算每幀相對參考幀的單應矩陣（手機放地上被震動滑移也能修正）。
+3. **鏡頭移動補償**：原則上鏡頭固定。每 2.5 秒取一個關鍵幀，用背景特徵點（排除玩家）對參考幀估單應矩陣；估計位移超過畫面寬 3%、且下一個關鍵幀也確認，才換一段新的鏡頭位置（逐幀補償會把遊戲畫面、毛巾、人的動作誤當成晃動，讓九宮格抖動）。
+   **非遊玩段不分析**：抓不到人、鏡頭對不上參考幀、或雙腳離平常位置超過 1.5 條腿長的幀（例如拿起手機拍結算畫面）不列入分析；3 秒內的缺口視為遮擋，短於 5 秒的片段不算遊玩。
 4. **落地偵測**：腳的速度低於門檻（以小腿長正規化）即視為落地；接觸點取前腳掌（腳跟→腳尖 60%）。
 5. **踏板校正**
    - 自動（首選）：箭頭板被踩時會亮紅／藍色箭頭燈。把整支影片的亮燈累積到參考幀，四團亮區就是四個箭頭板中心。
@@ -77,6 +80,10 @@ python -m ddrpose.analyze data\IMG_1194                          # 分析（改�
 10. **指標與建議**：重心左右晃動／偏移、骨盆彈跳、抬腳高度、膝角（側拍才可靠）、落點貼邊／散佈／踩到角落、扶桿比例。門檻寫在 `ddrpose/analyze.py` 的 `TH`。
 
 ## 介面
+
+![介面說明](docs/images/overview.png)
+
+①影片選單 ②分析狀態（校正方式、重心算法、步數）③語言 ④新增影片 ⑤影片疊圖 ⑥播放控制與圖層開關 ⑦校正踏板 ⑧時間軸（重心、骨盆高度、落地、踏板亮燈）⑨俯視踏板 ⑩結果分頁。每個部分的詳細說明（日文）見 [README.md](README.md)。
 
 - 右上角可切換中文／日文（介面文字與修正建議都是中日雙語）。
 - 「重心事件」分頁：點一下跳到該處以 0.25× 慢放，俯視圖畫出該段重心軌跡與編號腳步。

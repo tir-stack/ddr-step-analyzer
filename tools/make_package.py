@@ -1,11 +1,10 @@
-"""打包給別人用：產生 dist/ddr-step-analyzer_YYYYMMDD.zip。
+"""打包給別人用：產生 dist/ddr-step-analyzer_v<版本>.zip（版本在 ddrpose/__init__.py）。
 
 只放程式與說明（約數百 KB）；不含 data/（分析結果）、.venv/（對方安裝時自己建）、模型（安裝時自動下載）。
 用法：python tools/make_package.py（或雙擊 make_package.bat）
 """
 from __future__ import annotations
 
-import datetime
 import sys
 import zipfile
 from pathlib import Path
@@ -17,7 +16,9 @@ INCLUDE = ['server.py', 'requirements.txt', 'setup.bat', 'start.bat', 'README.md
 
 def main():
     sys.stdout.reconfigure(errors='replace')
-    out = ROOT / 'dist' / f'ddr-step-analyzer_{datetime.date.today():%Y%m%d}.zip'
+    sys.path.insert(0, str(ROOT))
+    from ddrpose import __version__
+    out = ROOT / 'dist' / f'ddr-step-analyzer_v{__version__}.zip'
     out.parent.mkdir(exist_ok=True)
     n = 0
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:

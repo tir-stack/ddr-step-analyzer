@@ -621,7 +621,11 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
 
     if _swap_all:
         K, S = _swap_legs(K, S, np.ones(len(K), bool))
-    Mot, ref_frame = _load_motion(vid_dir, n, meta['width'])
+    Mot, ref_frame, mot_ok = _load_motion(vid_dir, n, meta['width'])
+    # 非遊玩段（拿起手機拍結算畫面、選歌等）不分析：當作沒抓到人
+    play = _play_mask(K, S, valid, Mot, mot_ok, fps)
+    valid = valid & play
+    S = np.where(play[:, None], S, 0.0)
     K, S, swapped = fix_left_right(K, S, valid)
     X, rel = prep_keypoints(K, S, valid)
 
@@ -674,7 +678,8 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
     pts = None
     if len(P) >= 12:
         side = _is_side(P, f)
-        if source == 'manual':
+        if source != 'auto' and calib and calib.get('points'):
+            # 手動校正，或上一階段自動取得的板位（auto-glow／auto-feet 要沿用，不能在下一階段弄丟）
             pts = {k: np.asarray(v, float) for k, v in calib['points'].items()}
             side = np.linalg.norm(pts['L'] - pts['R']) < 0.25 * np.linalg.norm(pts['U'] - pts['D'])
         if source == 'auto':
@@ -682,7 +687,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             gp = None
             if (vid_dir / 'preview.mp4').exists():
                 from .glow import glow_map, glow_points
-                Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'])
+                Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'], play)
                 gp = glow_points(Fg, gs, P, f, init_pts=foot_pts)
             if gp is not None:
                 gpts = {k: np.asarray(gp[k]) for k in 'LDUR'}
@@ -845,7 +850,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
     lights, fit_info, n_light_only = None, None, 0
     if view['mode'] == 'homography' and (vid_dir / 'preview.mp4').exists():
         from .glow import glow_map, lit_at_step, light_onsets, panel_lights
-        Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'])
+        Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'], play)
         lights = panel_lights(Fr_glow, gs, np.linalg.inv(_h_from_points(pts)))
         for st in steps:
             fp = [st['heel_pad'], st['toe_pad']] if st.get('heel_pad') and st['heel_pad'][0] is not None else None
@@ -1029,7 +1034,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
 
     metrics, advice = _metrics_and_advice(
         t, fps, view, steps, swings, com_obs, com_rel, axis_info, hip_h, leg_px / S_glob, knee, planted,
-        side_view, hold, source, com_mode)
+        side_view, hold, source, com_mode, play_s=play.sum() / fps)
     _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info)
 
     grid = _grid_lines(pts, view) if pts is not None else []
@@ -1071,17 +1076,59 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
 
 
 def _load_motion(vid_dir, n, width):
+    """回傳 (M, 參考幀, ok)。舊版（逐幀補償）的 motion.npz 會重算，連帶依賴它的亮燈圖與背景也重算。"""
     from . import stabilize
     f = vid_dir / 'motion.npz'
     if f.exists():
         z = np.load(f)
-        if len(z['M']) == n:
-            return z['M'], int(z['ref'])
+        if len(z['M']) == n and int(z.get('ver', 1)) == stabilize.VERSION:
+            return z['M'], int(z['ref']), z['ok']
     if (vid_dir / 'preview.mp4').exists():
+        for dep in ('glow.npz', 'vertical.json'):
+            (vid_dir / dep).unlink(missing_ok=True)
         r = stabilize.compute_motion(vid_dir, width)
         if r is not None:
-            return r
-    return np.tile(np.eye(3), (n, 1, 1)), 0
+            return r[0], r[1], np.load(f)['ok']
+    return np.tile(np.eye(3), (n, 1, 1)), 0, np.ones(n, bool)
+
+
+PLAY_GAP_S = 3.0     # 遊玩中短暫抓不到腳（遮擋）不算中斷
+PLAY_MIN_S = 5.0     # 太短的片段不算遊玩
+
+
+def _play_mask(K, S, valid, Mot, mot_ok, fps):
+    """遊玩中的幀：有抓到人、鏡頭對得上參考幀、雙腳在平常站的範圍內（參考幀座標，約 1.5 條腿長內）。"""
+    n = len(K)
+    feet = [LEG[s][p] for s in LEG for p in ('heel', 'bt', 'st')]
+    fs = S[:, feet].min(1) >= 0.3
+    foot = np.where(fs[:, None], K[:, feet].mean(1), np.nan)
+    leg = np.nanmedian(np.linalg.norm(K[:, 11] - K[:, 15], axis=1)[valid]) if valid.any() else np.nan
+    raw = valid & mot_ok & fs
+    if raw.sum() < fps * PLAY_MIN_S or not np.isfinite(leg):
+        return valid.copy()
+    ref = np.full((n, 2), np.nan)
+    ref[raw] = _warp(Mot[raw], foot[raw])
+    d = np.linalg.norm(ref - np.nanmedian(ref[raw], 0), axis=1)
+    raw &= d < 1.5 * leg
+    # 補短缺口、去掉太短的片段
+    play = raw.copy()
+    idx = np.where(raw)[0]
+    for a, b in zip(idx[:-1], idx[1:]):
+        if 1 < b - a <= PLAY_GAP_S * fps:
+            play[a:b] = True
+    out = np.zeros(n, bool)
+    i = 0
+    while i < n:
+        if play[i]:
+            j = i
+            while j < n and play[j]:
+                j += 1
+            if j - i >= PLAY_MIN_S * fps:
+                out[i:j] = True
+            i = j
+        else:
+            i += 1
+    return out if out.any() else valid.copy()
 
 
 def _load_vertical(vid_dir, Mot, meta):
@@ -1214,9 +1261,9 @@ def _axis_names(a):
 
 
 def _metrics_and_advice(t, fps, view, steps, swings, com_obs, com_rel, axis, hip_h, leg_ratio, knee,
-                        planted, side_view, hold, source, com_mode):
+                        planted, side_view, hold, source, com_mode, play_s=None):
     M, A = {}, []
-    dur = float(t[-1] - t[0]) if len(t) > 1 else 0
+    dur = float(play_s) if play_s is not None else (float(t[-1] - t[0]) if len(t) > 1 else 0)
     M['duration_s'] = _r(dur, 1)
     M['steps'] = len(steps)
     M['steps_per_s'] = _r(len(steps) / dur, 2) if dur else None

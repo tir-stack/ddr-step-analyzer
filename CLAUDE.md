@@ -12,7 +12,7 @@
 | 檔案 | 內容 |
 |---|---|
 | `ddrpose/pose.py` | 姿勢擷取（YOLOX＋RTMPose-x）、預覽轉檔、ffmpeg 定位、`--download-models` |
-| `ddrpose/stabilize.py` | 鏡頭晃動補償（每幀→參考幀的單應矩陣，`motion.npz`） |
+| `ddrpose/stabilize.py` | 鏡頭移動補償：**原則固定**，每 2.5 秒關鍵幀、位移 >3% 且下一關鍵幀確認才換段（分段常數，`motion.npz` 含 `ok`／`seg`／`ver`）；逐幀補償會讓九宮格抖 |
 | `ddrpose/glow.py` | 踏板亮燈：累積圖→找四個箭頭板、逐幀亮燈、落地時亮起的板 |
 | `ddrpose/analyze.py` | 主分析（三階段，見下）、重心分段模型、指標與**雙語建議**（`_adv(..., (zh, ja))`） |
 | `ddrpose/events.py` | 重心大幅移動事件與三步配置統計 |
@@ -25,6 +25,8 @@
 ## 分析流程（analyze.py）
 - 三階段，靠 calib dict 的內部欄位遞迴：stage 0 取得亮燈板位 → stage 1 分板腳跟基準、用亮燈擬合**腳部點離地高度 `_sole_h`**與腳長寬容 `_foot_ext`（自動校正時也微調九宮格）→ stage 2 最終。
 - `calib.json` 只存使用者的 `points`（←↓↑→ 中心，參考幀座標）與 `foot_offset`（手動腳位置偏移，踏板座標）；底線開頭的欄位是內部用，不要寫進檔案。
+- **非遊玩段不分析**（`_play_mask`）：沒抓到人、鏡頭對不上參考幀、雙腳離常站位置 >1.5 腿長的幀排除（例：拿手機拍結算畫面）；亮燈圖也只累積遊玩幀。
+- 下一階段沿用上一階段的自動板位（`_source` 為 auto-glow／auto-feet 時用 `calib['points']`）。
 - 以**踏板亮燈為標準答案**：步數與板位以亮燈為準，骨架判斷用哪個部位踩。
 - 座標：踏板座標 x 往右、y 往後（↓），箭頭在 ±1；影像座標分「目前幀」與「參考幀」（`frames.M` 轉換），預覽檔解析度 ≠ 原始解析度。
 
@@ -39,6 +41,7 @@
 - 改後端要**重啟伺服器**（模組不會重載）；改分析邏輯後重跑 `python -m ddrpose.analyze data/<id>`。
 - 開發時用 `python server.py --no-auto-exit`（否則關掉分頁 10 秒後伺服器自動結束）。
 - 介面文字一律加到 `web/i18n.js` 的 zh 和 ja；建議文字在 `analyze.py` 同時寫中日文。
+- 版本在 `ddrpose/__init__.py` 的 `__version__`；發佈：改版本 → `make_package.bat` → GitHub Release（帳號 xkamome）。
 - 改完要給別人用：`make_package.bat`，並同步更新 `はじめにお読みください.txt`。
 - `data/`（影片、分析結果）是個人資料，不進 git；也不要未經同意改使用者影片的 `calib.json`。
 

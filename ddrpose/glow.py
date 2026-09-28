@@ -14,13 +14,15 @@ from itertools import combinations
 CELL = 8          # 逐幀亮燈圖的縮小倍率（預覽解析度 / 8）
 
 
-def glow_map(vid_dir: str | Path, M, orig_w: int):
-    """回傳 (F, scale, Fr)：F 亮燈頻率圖；Fr 每幀亮燈圖（每格 8×8 像素中亮的像素數，0–64）。"""
+def glow_map(vid_dir: str | Path, M, orig_w: int, play=None):
+    """回傳 (F, scale, Fr)：F 亮燈頻率圖；Fr 每幀亮燈圖（每格 8×8 像素中亮的像素數，0–64）。
+    play：遊玩中的幀（其餘幀不累積、Fr 為 0）。"""
     vid_dir = Path(vid_dir)
     f = vid_dir / 'glow.npz'
+    play = np.ones(len(M), bool) if play is None else np.asarray(play, bool)
     if f.exists():
         z = np.load(f)
-        if 'Fr' in z and len(z['Fr']) == len(M):
+        if 'Fr' in z and len(z['Fr']) == len(M) and 'play' in z and np.array_equal(z['play'], play):
             return z['F'], float(z['scale']), z['Fr']
     cap = cv2.VideoCapture(str(vid_dir / 'preview.mp4'))
     pw, ph = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -33,6 +35,9 @@ def glow_map(vid_dir: str | Path, M, orig_w: int):
         ok, fr = cap.read()
         if not ok or i >= len(M):
             break
+        if not play[i]:
+            i += 1
+            continue
         hsv = cv2.cvtColor(fr, cv2.COLOR_BGR2HSV)
         H, Sa, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
         m = ((Sa > 140) & (V > 140) & ((H < 8) | (H > 172) | ((H > 100) & (H < 130)))).astype(np.uint8)
@@ -42,8 +47,8 @@ def glow_map(vid_dir: str | Path, M, orig_w: int):
                  .reshape(Fr.shape[1], CELL, Fr.shape[2], CELL).sum((1, 3))).astype(np.uint8)
         i += 1
     cap.release()
-    F = C / max(i, 1)
-    np.savez_compressed(f, F=F, scale=s, Fr=Fr)
+    F = C / max(int(play[:i].sum()), 1)
+    np.savez_compressed(f, F=F, scale=s, Fr=Fr, play=play)
     return F, s, Fr
 
 
