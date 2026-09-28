@@ -25,7 +25,7 @@ function Fail($m) {
 Say '=== DDR ステップ解析：セットアップ ==='
 Say "フォルダ：$Root"
 if ($Root -match 'OneDrive') {
-  Write-Host '注意：OneDrive のフォルダ内にあります。同期でとても遅くなることがあるので、C:\ddr-pose などに移動してからの実行をおすすめします。' -ForegroundColor Yellow
+  Write-Host '注意：OneDrive のフォルダ内にあります。同期でとても遅くなることがあるので、C:\ddr-step-analyzer などに移動してからの実行をおすすめします。' -ForegroundColor Yellow
 }
 
 function Get-PyExe([string]$cmd, [string[]]$pre) {

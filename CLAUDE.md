@@ -1,6 +1,6 @@
-# step（DDR ステップ解析）— Claude Code 約定
+# ddr-step-analyzer（DDR ステップ解析）— Claude Code 約定
 
-用骨架（RTMPose Halpe26）分析 DDR 遊玩影片的踩點、重心、腳尖／腳跟，給出修正建議。本機 Python 後端＋瀏覽器介面，不用任何雲端 API。使用說明見 `README.md`（中文）與 `はじめにお読みください.txt`（給日文使用者）。
+用骨架（RTMPose Halpe26）分析 DDR 遊玩影片的踩點、重心、腳尖／腳跟，給出修正建議。本機 Python 後端＋瀏覽器介面，不用任何雲端 API。使用說明見 `README.md`（日文，GitHub 首頁）、`README.zh-TW.md`（中文）與 `はじめにお読みください.txt`（給日文使用者）。
 
 ## 使用者與偏好
 - 使用者是高階 DDR 玩家（15 級以上），也會把工具交給**不懂電腦的日文使用者**（Windows）。
@@ -20,7 +20,7 @@
 | `web/i18n.js` | **所有介面文字**（zh / ja）；後端短標籤的翻譯在 `VAL` |
 | `web/app.js` | 介面（疊圖、俯視圖、時間軸、校正編輯、事件） |
 | `tools/setup.ps1` | 給使用者的一鍵安裝（自動裝 Python 3.12、venv、模型） |
-| `tools/make_package.py` | 打包 `dist/*.zip` 給別人 |
+| `tools/make_package.py` | 打包 `dist/ddr-step-analyzer_*.zip`（發佈到 GitHub Releases） |
 
 ## 分析流程（analyze.py）
 - 三階段，靠 calib dict 的內部欄位遞迴：stage 0 取得亮燈板位 → stage 1 分板腳跟基準、用亮燈擬合**腳部點離地高度 `_sole_h`**與腳長寬容 `_foot_ext`（自動校正時也微調九宮格）→ stage 2 最終。
