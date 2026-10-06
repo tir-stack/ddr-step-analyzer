@@ -758,6 +758,12 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             pts = {k: np.asarray(v, float) for k, v in calib['points'].items() if k in DP_KEYS}
             if len(pts) != len(DP_KEYS):
                 pts, source = None, 'auto'
+        if source == 'auto' and (vid_dir / 'preview.mp4').exists():
+            from .glow import glow_map, glow_points_dp
+            Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'], play)
+            gp = glow_points_dp(Fg, gs, P, f)
+            if gp is not None:
+                pts, source = {k: np.asarray(gp[k]) for k in DP_KEYS}, 'auto-glow'
         view = {'mode': 'homography'} if pts else {'mode': 'none'}
     elif len(P) >= 12:
         side = _is_side(P, f)

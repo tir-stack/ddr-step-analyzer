@@ -12,6 +12,7 @@ import numpy as np
 from itertools import combinations
 
 CELL = 8          # 逐幀亮燈圖的縮小倍率（預覽解析度 / 8）
+ARROWS_SP = {'L': (-1.0, 0.0), 'D': (0.0, 1.0), 'U': (0.0, -1.0), 'R': (1.0, 0.0)}   # 同 analyze.ARROWS
 
 
 def glow_map(vid_dir: str | Path, M, orig_w: int, play=None):
@@ -191,6 +192,116 @@ def glow_points(F, s, contacts_ref, fwd, init_pts=None):
         return None
     out = {k: v / s for k, v in best[1].items()}
     out['_mass'] = best[2]
+    return out
+
+
+def glow_points_dp(F, s, contacts_ref, fwd):
+    """DP：兩台共 8 塊箭頭板 → {'1L',…,'2R': 原始解析度參考幀座標}；找不到可信配置則回傳 None。
+    譜面常讓某一台的 ↑↓ 很少亮（例如 2P↑↓），所以不要求 8 團亮區都找得到：
+      1) 先找最可信的一台（四團亮區組成的菱形，同 SP）；
+      2) 另一台＝同形狀的菱形平移到左／右側並縮放（相鄰兩台在畫面上近似仿射；用單一菱形的單應矩陣
+         外插到三格外，在廣角手機鏡頭下誤差很大），掃描間距、大小與前後微調，取預測位置亮燈最強的配置；
+      3) 另一台的每塊板，附近有亮區就對齊到亮區重心，再用對齊的點重估平移與縮放，預測其餘的板。
+    最後的 8 點仍由 analyze 以單應矩陣（最小平方）＋台間距擬合，並在第 1 階段用亮燈步微調。"""
+    if F is None or len(contacts_ref) < 12:
+        return None
+    G = F.copy()
+    G[cv2.dilate((F > 0.5).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0] = 0
+    P = np.asarray(contacts_ref) * s
+    spread = float(np.percentile(np.linalg.norm(P - np.median(P, 0), axis=1), 90))
+    roi = np.zeros(G.shape, np.uint8)
+    for x, y in P:
+        cv2.circle(roi, (int(x), int(y)), int(max(40, 1.5 * spread)), 1, -1)
+    G = cv2.GaussianBlur(G * roi, (0, 0), 2.5)
+    if G.max() <= 0:
+        return None
+    Gn = G / G.max()
+    comps_all = []
+    for thr in (0.25, 0.15, 0.08):
+        mask = (Gn > thr).astype(np.uint8)
+        nlab, lab_img = cv2.connectedComponents(mask)
+        comps = []
+        for k in range(1, nlab):
+            yy, xx = np.where(lab_img == k)
+            ww = G[yy, xx]
+            if ww.sum() > 0:
+                comps.append((float(ww.sum()), np.array([np.average(xx, weights=ww), np.average(yy, weights=ww)])))
+        comps.sort(key=lambda c: -c[0])
+        comps_all.append(comps[:10])
+    h, w = G.shape
+
+    def peak(p, rr):
+        x, y = int(round(p[0])), int(round(p[1]))
+        if not (0 <= x < w and 0 <= y < h):
+            return 0.0
+        return float(Gn[max(0, y - rr):y + rr + 1, max(0, x - rr):x + rr + 1].max())
+
+    diamonds = []
+    for comps in comps_all:
+        if len(comps) < 4:
+            continue
+        tot = sum(c[0] for c in comps)
+        for combo in combinations(range(len(comps)), 4):
+            pts = np.array([comps[k][1] for k in combo]); ms = np.array([comps[k][0] for k in combo])
+            if ms.min() < 0.02 * tot:
+                continue
+            r = _label_diamond(pts, fwd)
+            if r is None:
+                continue
+            lab, tt, center = r
+            base = ms.sum() / tot * np.exp(-((tt - 0.5) ** 2).sum() / 0.02)
+            diamonds.append((base, {k: pts[i] for k, i in lab.items()}, center))
+    diamonds.sort(key=lambda d: -d[0])
+    best = None
+    for base, q, c in diamonds[:6]:
+        ex, ey = (q['R'] - q['L']) / 2, (q['D'] - q['U']) / 2
+        rel = {k: q[k] - c for k in 'LDUR'}
+        ppx = (np.linalg.norm(ex) + np.linalg.norm(ey)) / 2
+        rr = max(2, int(0.12 * ppx))
+        for side in (1, -1):
+            for lam in np.arange(2.6, 5.01, 0.1):           # 兩台中心距離（格，近似）＝ 2 × gap
+                for sc_ in np.arange(0.6, 1.41, 0.05):      # 透視：另一台在畫面上的大小比例
+                    c2a = c + side * lam * ex * (1 + sc_) / 2
+                    for mu in np.arange(-0.3, 0.31, 0.1):   # 前後微調
+                        c2 = c2a + mu * ey
+                        op = {k: c2 + sc_ * rel[k] for k in 'LDUR'}
+                        sc = base * (0.05 + sum(peak(p, rr) for p in op.values()))
+                        if best is None or sc > best[0]:
+                            best = (sc, q, op, side, ppx, sc_, rel)
+    if best is None:
+        return None
+    _, q, other, side, ppx, sc_, rel = best
+    # 另一台：預測位置附近有亮區就對齊；有對齊的點時，用它們重估另一台的位置與大小，再預測其餘的板
+    blobs = []                                              # 各門檻的亮區（低門檻時相鄰亮區會黏在一起，所以全部都留）
+    for thr in (0.25, 0.15, 0.08, 0.04):
+        nlab, lab_img = cv2.connectedComponents((Gn > thr).astype(np.uint8))
+        for k in range(1, nlab):
+            yy, xx = np.where(lab_img == k)
+            ww = G[yy, xx]
+            if ww.sum() > 0:
+                blobs.append(np.array([np.average(xx, weights=ww), np.average(yy, weights=ww)]))
+    blobs = [b_ for b_ in blobs if all(np.linalg.norm(b_ - v) > 0.3 * ppx for v in q.values())]
+    snapped = {}
+    for k, p in other.items():
+        d = [np.linalg.norm(b_ - p) for b_ in blobs]
+        if d and min(d) < 0.5 * sc_ * ppx:
+            snapped[k] = blobs[int(np.argmin(d))]
+    if snapped:
+        # 最小平方：other_k ≈ c2 + s·rel_k（平移＋縮放）
+        ks = list(snapped)
+        A_ = np.vstack([np.c_[np.eye(2), rel[k]] for k in ks])
+        b_ = np.concatenate([snapped[k] for k in ks])
+        if len(ks) >= 2:
+            cx, cy, s2 = np.linalg.lstsq(A_, b_, rcond=None)[0]
+        else:
+            s2 = sc_
+            cx, cy = snapped[ks[0]] - s2 * rel[ks[0]]
+        for k in 'LDUR':
+            other[k] = snapped[k] if k in snapped else np.array([cx, cy]) + s2 * rel[k]
+    a, b = (q, other) if side > 0 else (other, q)          # side>0：找到的那台在左邊＝P1
+    out = {'1' + k: np.asarray(v, float) / s for k, v in a.items()}
+    out.update({'2' + k: np.asarray(v, float) / s for k, v in b.items()})
+    out['_snapped'] = len(snapped)
     return out
 
 
