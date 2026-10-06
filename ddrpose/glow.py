@@ -209,9 +209,11 @@ def glow_points_dp(F, s, contacts_ref, fwd):
     G[cv2.dilate((F > 0.5).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0] = 0
     P = np.asarray(contacts_ref) * s
     spread = float(np.percentile(np.linalg.norm(P - np.median(P, 0), axis=1), 90))
+    # 只看腳附近：DP 的落點雲橫跨兩台，用 SP 的「1.8 倍散佈」會圈到機台螢幕與天花板燈，
+    # 所以改成落點的凸包再外擴（箭頭板一定在腳踩得到的地方）
     roi = np.zeros(G.shape, np.uint8)
-    for x, y in P:
-        cv2.circle(roi, (int(x), int(y)), int(max(40, 1.5 * spread)), 1, -1)
+    cv2.fillPoly(roi, [cv2.convexHull(np.round(P).astype(np.int32))], 1)
+    roi = cv2.dilate(roi, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * int(max(20, 0.25 * spread)) + 1,) * 2))
     G = cv2.GaussianBlur(G * roi, (0, 0), 2.5)
     if G.max() <= 0:
         return None
@@ -249,8 +251,13 @@ def glow_points_dp(F, s, contacts_ref, fwd):
             if r is None:
                 continue
             lab, tt, center = r
+            q = {k: pts[i] for k, i in lab.items()}
+            # 兩條對角線要明顯交叉（扁平到幾乎平行的四點不是一台；腳尖方向斜 40° 時 SP 的方向檢查擋不住）
+            du, dl = q['D'] - q['U'], q['R'] - q['L']
+            if abs(du @ dl) / (np.linalg.norm(du) * np.linalg.norm(dl) + 1e-9) > 0.8:
+                continue
             base = ms.sum() / tot * np.exp(-((tt - 0.5) ** 2).sum() / 0.02)
-            diamonds.append((base, {k: pts[i] for k, i in lab.items()}, center))
+            diamonds.append((base, q, center))
     diamonds.sort(key=lambda d: -d[0])
     best = None
     for base, q, c in diamonds[:6]:
