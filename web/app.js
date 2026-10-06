@@ -5,10 +5,25 @@ const video = $('#video'), overlay = $('#overlay'), padCv = $('#pad'), chartCv =
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const COL = { L: css('--L'), R: css('--R'), com: css('--com'), ev: '#f472b6' };
 const PANEL_COL = { '←': css('--aL'), '↓': css('--aD'), '↑': css('--aU'), '→': css('--aR'),
-  '中央': '#9ca3af', '中間列': '#9ca3af', '角落': '#f59e0b', '板外': '#ef4444' };
+  '中央': '#9ca3af', '中間列': '#9ca3af', '角落': '#f59e0b', '板外': '#ef4444', '台間': '#ef4444' };
+const REGION_COL = { 1: '#38bdf8', 2: '#fb7185', m: '#facc15', c: '#9ca3af' };    // DP 所在台
 const ARROW_KEYS = { L: '←', D: '↓', U: '↑', R: '→' };
 const ARROW_POS = { L: [-1, 0], D: [0, 1], U: [0, -1], R: [1, 0] };
 const ARROW_COL = { L: css('--aL'), D: css('--aD'), U: css('--aU'), R: css('--aR') };
+// 踏板配置：SP＝原本的 ←↓↑→；DP＝P1 台（中心 -gap）＋P2 台（中心 +gap），鍵為 '1L'…'2R'、符號為「1P←」
+const SP_LAY = { dp: false, keys: ['L', 'D', 'U', 'R'], pos: ARROW_POS, sym: ARROW_KEYS, col: ARROW_COL, gap: 0, pads: [['', 0]] };
+function makeLay(dp, gap) {
+  if (!dp) return SP_LAY;
+  const L = { dp: true, keys: [], pos: {}, sym: {}, col: {}, gap, pads: [['1', -gap], ['2', gap]] };
+  for (const [p, cx] of L.pads) for (const k of 'LDUR') {
+    const key = p + k; L.keys.push(key); L.pos[key] = [ARROW_POS[k][0] + cx, ARROW_POS[k][1]];
+    L.sym[key] = `${p}P${ARROW_KEYS[k]}`; L.col[key] = ARROW_COL[k];
+  }
+  return L;
+}
+const LAY = () => S.A ? makeLay(S.A.calibration.mode === 'dp', S.A.calibration.gap || 1.75) : SP_LAY;
+const panelCol = p => PANEL_COL[p] || (p && /^[12]P/.test(p) ? PANEL_COL[p.slice(2)] : null);
+const panelShort = p => (p && /^[12]P/.test(p)) ? p[0] + p.slice(2) : (p?.[0] || '');
 
 // Halpe26 骨架連線：[a, b, 側別]
 const BONES = [[17, 18, 'C'], [18, 5, 'L'], [18, 6, 'R'], [5, 7, 'L'], [7, 9, 'L'], [6, 8, 'R'], [8, 10, 'R'],
@@ -128,6 +143,7 @@ function drawShoe(g, P, pose, foot, Lf, { alpha = 0.85, heelUp = false, outline 
 function renderAll() {
   if (!S.A) return;
   const A = S.A, v = A.view, b = [];
+  if (A.calibration.mode === 'dp') b.push([t('b.dp', { g: A.calibration.gap ?? '-' })]);
   b.push(v.mode === 'homography' ? [t('b.homo')] : v.mode === 'side' ? [t('b.side'), 1] : [t('b.none'), 1]);
   b.push([{ manual: t('b.manual'), 'auto-glow': t('b.glow'), 'auto-feet': t('b.feet') }[A.calibration.source] || t('b.nocal'),
     A.calibration.source === 'auto-feet']);
@@ -196,7 +212,11 @@ function vmap() {
   const ox = (cw - m.width * s) / 2, oy = (ch - m.height * s) / 2;
   return { s, ox, oy, f: p => [ox + p[0] * s, oy + p[1] * s], inv: (x, y) => [(x - ox) / s, (y - oy) / s] };
 }
-const padH = () => { const P = S.A.calibration.points; return homog('LDUR'.split('').map(k => ARROW_POS[k]), 'LDUR'.split('').map(k => P[k])); };
+const padH = () => {
+  const P = S.A.calibration.points, Ly = LAY();
+  if (!Ly.dp) return homog('LDUR'.split('').map(k => ARROW_POS[k]), 'LDUR'.split('').map(k => P[k]));
+  return homogLSQ(Ly.keys.map(k => Ly.pos[k]), Ly.keys.map(k => P[k]));   // DP：8 點最小平方
+};
 
 function drawOverlay() {
   const [g] = fitCanvas(overlay); if (!S.A) return;
@@ -207,20 +227,21 @@ function drawOverlay() {
     const Mi = inv3(F.M[i]);
     for (const ln of A.calibration.grid) { g.beginPath(); ln.forEach((p, k) => { const [x, y] = M.f(ap3(Mi, p)); k ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); }
     g.setLineDash([]);
-    for (const [k, p] of Object.entries(A.calibration.points || {})) label(g, M.f(ap3(Mi, p)), ARROW_KEYS[k], ARROW_COL[k], 0.55);
+    const Ly = LAY();
+    for (const [k, p] of Object.entries(A.calibration.points || {})) label(g, M.f(ap3(Mi, p)), Ly.sym[k] || ARROW_KEYS[k], Ly.col[k] || ARROW_COL[k], 0.55);
   } else if (S.layers.grid && A.view.mode === 'side' && !S.calib) {
     for (const k of ['U', 'D']) { const p = A.calibration.points[k]; label(g, M.f(fromRef(p)), t('row', { a: ARROW_KEYS[k] }), ARROW_COL[k], 0.55); }
   }
   // 亮燈中的箭頭板（機台判定）
   if (F.lights && A.calibration.points && A.view.mode === 'homography' && !S.calib) {
-    const Hp = padH(), Mi = inv3(F.M[i]);
-    for (const k of 'LDUR') {
-      const v = F.lights[ARROW_KEYS[k]][i]; if (!(v > 0.4)) continue;
-      const [ax, ay] = ARROW_POS[k];
+    const Hp = padH(), Mi = inv3(F.M[i]), Ly = LAY();
+    for (const k of Ly.keys) {
+      const v = (F.lights[Ly.sym[k]] || [])[i]; if (!(v > 0.4)) continue;
+      const [ax, ay] = Ly.pos[k];
       g.beginPath(); [[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]].forEach(([dx, dy], n) => {
         const [x, y] = M.f(ap3(Mi, ap3(Hp, [ax + dx, ay + dy]))); n ? g.lineTo(x, y) : g.moveTo(x, y); });
-      g.closePath(); g.strokeStyle = ARROW_COL[k]; g.lineWidth = 3; g.stroke();
-      g.fillStyle = ARROW_COL[k]; g.globalAlpha = 0.25; g.fill(); g.globalAlpha = 1;
+      g.closePath(); g.strokeStyle = Ly.col[k]; g.lineWidth = 3; g.stroke();
+      g.fillStyle = Ly.col[k]; g.globalAlpha = 0.25; g.fill(); g.globalAlpha = 1;
     }
   }
   // 骨架
@@ -290,22 +311,26 @@ function drawOverlay() {
   }
   // 可編輯九宮格（點選對應點時先不畫格子）
   if (S.calib && !S.calib.pick) {
-    const Hc = homog(PAD_CORNERS, S.calib.C), scr = q => M.f(fromRef(ap3(Hc, q))), zk = 1 / Z.k;
-    for (const [k, [ax, ay]] of Object.entries(ARROW_POS)) {
-      g.beginPath(); [[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]].forEach(([dx, dy], n) => {
-        const [x, y] = scr([ax + dx, ay + dy]); n ? g.lineTo(x, y) : g.moveTo(x, y); });
-      g.closePath(); g.fillStyle = ARROW_COL[k]; g.globalAlpha = 0.28; g.fill(); g.globalAlpha = 1;
-      const [x, y] = scr([ax, ay]);
-      g.fillStyle = '#fff'; g.font = `bold ${Math.round(18 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(ARROW_KEYS[k], x, y);
-    }
-    g.strokeStyle = '#fff'; g.lineWidth = 1.6 * zk;
-    for (const v of [-1.5, -0.5, 0.5, 1.5]) for (const vert of [0, 1]) {
-      g.beginPath();
-      for (let u = -1.5; u <= 1.5001; u += 0.25) { const [x, y] = scr(vert ? [v, u] : [u, v]); u === -1.5 ? g.moveTo(x, y) : g.lineTo(x, y); }
-      g.stroke();
-    }
-    const [sx, sy] = scr([0, -1.9]); g.fillStyle = '#facc15'; g.font = `${Math.round(12 * zk)}px sans-serif`; g.fillText(t('pad.screen'), sx, sy);
+    const zk = 1 / Z.k;
+    calibPads().forEach(([pre], pi) => {
+      const Hc = padHc(pi), scr = q => M.f(fromRef(ap3(Hc, q)));
+      for (const [k, [ax, ay]] of Object.entries(ARROW_POS)) {
+        g.beginPath(); [[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]].forEach(([dx, dy], n) => {
+          const [x, y] = scr([ax + dx, ay + dy]); n ? g.lineTo(x, y) : g.moveTo(x, y); });
+        g.closePath(); g.fillStyle = ARROW_COL[k]; g.globalAlpha = 0.28; g.fill(); g.globalAlpha = 1;
+        const [x, y] = scr([ax, ay]);
+        g.fillStyle = '#fff'; g.font = `bold ${Math.round(18 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillText(ARROW_KEYS[k], x, y);
+      }
+      g.strokeStyle = '#fff'; g.lineWidth = 1.6 * zk;
+      for (const v of [-1.5, -0.5, 0.5, 1.5]) for (const vert of [0, 1]) {
+        g.beginPath();
+        for (let u = -1.5; u <= 1.5001; u += 0.25) { const [x, y] = scr(vert ? [v, u] : [u, v]); u === -1.5 ? g.moveTo(x, y) : g.lineTo(x, y); }
+        g.stroke();
+      }
+      const [sx, sy] = scr([0, -1.9]); g.fillStyle = '#facc15'; g.font = `${Math.round(12 * zk)}px sans-serif`;
+      g.fillText(pre ? `${pre}P・${t('pad.screen')}` : t('pad.screen'), sx, sy);
+    });
     for (const q of S.calib.C) {
       const [x, y] = M.f(fromRef(q));
       g.fillStyle = '#facc15'; g.strokeStyle = '#000'; g.lineWidth = 2 * zk;
@@ -313,12 +338,12 @@ function drawOverlay() {
     }
     // 箭頭中心把手（可拖曳）
     const AC = arrowCenters(S.calib.C);
-    for (const k of CLICK_ORDER) {
-      const [x, y] = M.f(fromRef(AC[k]));
-      g.fillStyle = ARROW_COL[k]; g.strokeStyle = '#fff'; g.lineWidth = 2 * zk;
+    for (const k of Object.keys(AC)) {
+      const a = k.slice(-1), [x, y] = M.f(fromRef(AC[k]));
+      g.fillStyle = ARROW_COL[a]; g.strokeStyle = '#fff'; g.lineWidth = 2 * zk;
       g.beginPath(); g.arc(x, y, 11 * zk, 0, 7); g.fill(); g.stroke();
       g.fillStyle = '#000'; g.font = `bold ${Math.round(13 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(ARROW_KEYS[k], x, y + 0.5);
+      g.fillText(ARROW_KEYS[a], x, y + 0.5);
     }
   }
   // 對應點：已點的位置（編號與俯視圖一致）
@@ -372,39 +397,51 @@ function drawFootOnPad(g, P, st, col, width, alpha) {
 function calibPreviewMap() {
   // 校正中：資料的踏板座標是舊校正算的；換到目前編輯中的校正（舊踏板→參考幀→新踏板）
   if (!S.calib || S.calib.pick || !S.A.calibration.points || S.A.view.mode !== 'homography') return null;
-  return mul3(inv3(homog(PAD_CORNERS, S.calib.C)), padH());
+  const Ly = LAY();
+  if (!Ly.dp) return mul3(inv3(homog(PAD_CORNERS, S.calib.C)), padH());
+  const AC = arrowCenters(S.calib.C), Hn = homogLSQ(Ly.keys.map(k => Ly.pos[k]), Ly.keys.map(k => AC[k]));
+  return Hn ? mul3(inv3(Hn), padH()) : null;
 }
 function mul3(A, B) { return [0, 1, 2].flatMap(i => [0, 1, 2].map(j => A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j])); }
 function drawPad() {
-  const [g, w] = fitCanvas(padCv); if (!S.A) return;
+  // 俯視圖範圍：SP 為 ±2.1 格見方；DP 為兩台並排（橫長）
+  const Ly = LAY(), RX = Ly.dp ? Ly.gap + 1.65 : 2.1, RY = Ly.dp ? 1.95 : 2.1, ar = `${RX} / ${RY}`;
+  if (padCv.style.aspectRatio !== ar) padCv.style.aspectRatio = Ly.dp ? ar : '';
+  const [g, w, h] = fitCanvas(padCv); if (!S.A) return;
   const A = S.A, F = A.frames, i = S.fi, tm = F.t[i];
-  const R = 2.1, sc = w / (2 * R), P0 = (x, y) => [w / 2 + x * sc, w / 2 + y * sc];
+  const sc = Ly.dp ? Math.min(w / (2 * RX), h / (2 * RY)) : w / (2 * RX), cy0 = Ly.dp ? h / 2 : w / 2;
+  const P0 = (x, y) => [w / 2 + x * sc, cy0 + y * sc];
+  S.padView = { sc };
   const G = calibPreviewMap();
   const P = G ? (x, y) => P0(...ap3(G, [x, y])) : P0;       // 資料點用 P（校正預覽會跟著動），格線用 P0
   // 腳：資料已含舊的手動偏移 off0；校正中預覽改成新偏移 off1
   const off0 = A.calibration.foot_offset || [0, 0], off1 = S.calib && S.calib.footOff ? S.calib.footOff : off0;
   const PF = (x, y) => { const q = [x - off0[0], y - off0[1]], [u, v] = G ? ap3(G, q) : q; return P0(u + off1[0], v + off1[1]); };
   const side = A.view.mode === 'side';
-  for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) {
-    const [x, y] = P0(gx - 0.5, gy - 0.5); const arrow = Math.abs(gx) + Math.abs(gy) === 1;
-    g.fillStyle = arrow ? '#232a38' : '#1a1f29'; g.fillRect(x + 1, y + 1, sc - 2, sc - 2);
+  for (const [, cx] of Ly.pads) {
+    for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) {
+      const [x, y] = P0(cx + gx - 0.5, gy - 0.5); const arrow = Math.abs(gx) + Math.abs(gy) === 1;
+      g.fillStyle = arrow ? '#232a38' : '#1a1f29'; g.fillRect(x + 1, y + 1, sc - 2, sc - 2);
+    }
+    g.strokeStyle = G ? '#facc15' : '#3a4252'; g.lineWidth = 1;
+    for (let v = -1.5; v <= 1.5; v += 1) {
+      g.beginPath(); g.moveTo(...P0(cx + v, -1.5)); g.lineTo(...P0(cx + v, 1.5)); g.stroke();
+      g.beginPath(); g.moveTo(...P0(cx - 1.5, v)); g.lineTo(...P0(cx + 1.5, v)); g.stroke();
+    }
   }
-  g.strokeStyle = G ? '#facc15' : '#3a4252'; g.lineWidth = 1;
-  for (let v = -1.5; v <= 1.5; v += 1) {
-    g.beginPath(); g.moveTo(...P0(v, -1.5)); g.lineTo(...P0(v, 1.5)); g.stroke();
-    g.beginPath(); g.moveTo(...P0(-1.5, v)); g.lineTo(...P0(1.5, v)); g.stroke();
-  }
-  for (const [k, [ax, ay]] of Object.entries(ARROW_POS)) {
-    const lit = F.lights && F.lights[ARROW_KEYS[k]][i] > 0.4;
-    if (lit) { const [x, y] = P0(ax - 0.5, ay - 0.5); g.fillStyle = ARROW_COL[k]; g.globalAlpha = 0.35; g.fillRect(x + 1, y + 1, sc - 2, sc - 2); g.globalAlpha = 1; }
-    drawArrow(g, P0(ax, ay), sc * 0.28, k, ARROW_COL[k]);
+  for (const k of Ly.keys) {
+    const [ax, ay] = Ly.pos[k], a = k.slice(-1);
+    const lit = F.lights && (F.lights[Ly.sym[k]] || [])[i] > 0.4;
+    if (lit) { const [x, y] = P0(ax - 0.5, ay - 0.5); g.fillStyle = Ly.col[k]; g.globalAlpha = 0.35; g.fillRect(x + 1, y + 1, sc - 2, sc - 2); g.globalAlpha = 1; }
+    drawArrow(g, P0(ax, ay), sc * 0.28, a, Ly.col[k]);
   }
   g.fillStyle = '#6b7280'; g.font = '11px sans-serif'; g.textAlign = 'center';
   g.fillText(t('pad.screen'), w / 2, 12);
-  if (A.view.mode === 'none' && !(S.calib && S.calib.pick)) { g.fillStyle = '#9ca3af'; g.fillText(t('pad.noCalib'), w / 2, w / 2); return; }
+  if (Ly.dp) for (const [pre, cx] of Ly.pads) { const [x] = P0(cx, 0); g.fillText(`${pre}P`, x, cy0 + 1.5 * sc + 12); }
+  if (A.view.mode === 'none' && !(S.calib && S.calib.pick)) { g.fillStyle = '#9ca3af'; g.fillText(t('pad.noCalib'), w / 2, cy0); return; }
   if (S.calib && S.calib.pick) {                          // 選對應點模式：只畫可選的點
     const pk = S.calib.pick, keys = Object.keys(pk.pairs), cur = pk.sel || nextDefaultTarget(pk);
-    for (const p of PICK_TARGETS) {
+    for (const p of pickTargets()) {
       const [x, y] = P0(...p), k = keys.indexOf(tkey(p)), isCur = cur && tkey(cur) === tkey(p);
       g.beginPath(); g.arc(x, y, k >= 0 ? 8 : 5, 0, 7);
       g.fillStyle = k >= 0 ? '#facc15' : '#e5e7eb'; g.globalAlpha = k >= 0 ? 1 : 0.55; g.fill(); g.globalAlpha = 1;
@@ -471,16 +508,18 @@ function drawPad() {
   if (S.calib && !S.calib.pick) {                          // 目前的手動腳位置偏移
     const [ox, oy] = S.calib.footOff;
     if (Math.hypot(ox, oy) > 0.005) { g.fillStyle = '#facc15'; g.font = '11px sans-serif'; g.textAlign = 'right';
-      g.fillText(t('pad.footOff', { x: (ox * 28).toFixed(0), y: (oy * 28).toFixed(0) }), w - 6, w - 6); }
+      g.fillText(t('pad.footOff', { x: (ox * 28).toFixed(0), y: (oy * 28).toFixed(0) }), w - 6, (Ly.dp ? h : w) - 6); }
   }
   // 重心
   const c = F.com_pad[i], ax = A.view.com_axis;
   const comXY = p => side ? [0, p[1]] : p;
   if (c && ax) {
     // 重心只量得到沿 ax 的位置 → 畫一條與 ax 垂直的虛線：重心在這條線上的某處
-    const o = F.com_obs[i] ?? 0, wv = [-ax[1], ax[0]];
+    // DP 的 com_obs 是相對目前所在台的中心；畫圖用踏板座標本身的投影
+    const o = Ly.dp ? c[0] * ax[0] + c[1] * ax[1] : (F.com_obs[i] ?? 0), wv = [-ax[1], ax[0]];
     const a0 = [ax[0] * o - wv[0] * 2, ax[1] * o - wv[1] * 2], a1 = [ax[0] * o + wv[0] * 2, ax[1] * o + wv[1] * 2];
-    g.save(); g.beginPath(); g.rect(...P0(-1.5, -1.5), 3 * sc, 3 * sc); g.clip();
+    const cxr = 1.5 + Ly.gap;
+    g.save(); g.beginPath(); g.rect(...P0(-cxr, -1.5), 2 * cxr * sc, 3 * sc); g.clip();
     g.strokeStyle = COL.com; g.lineWidth = 1.5; g.setLineDash([4, 4]);
     g.beginPath(); g.moveTo(...P(...a0)); g.lineTo(...P(...a1)); g.stroke(); g.setLineDash([]); g.restore();
     g.strokeStyle = 'rgba(250,204,21,.25)'; g.lineWidth = 1;
@@ -520,15 +559,17 @@ function drawCharts() {
   const L = 64, Rm = 10, X = tt => L + (tt - t0) / (t1 - t0) * (w - L - Rm);
   const i0 = frameAt(t0), i1 = frameAt(t1), stepN = Math.max(1, Math.floor((i1 - i0) / (w * 1.5)));
   const AN = A.view.com_axis_names || { axis: '-', pos: '+', neg: '-' };
-  const lanes = [{ name: t('lane.com'), h: 0.30 }, { name: t('lane.hip'), h: 0.22 }, { name: t('lane.steps'), h: 0.22 }];
-  if (F.lights) lanes.push({ name: t('lane.lights'), h: 0.26 }); else lanes[2].h = 0.48;
+  const Ly = LAY();
+  const lanes = [{ name: t('lane.com'), h: 0.30, kind: 'com' }, { name: t('lane.hip'), h: 0.22, kind: 'hip' }, { name: t('lane.steps'), h: 0.22, kind: 'steps' }];
+  if (F.lights) lanes.push({ name: t('lane.lights'), h: 0.26, kind: 'lights' }); else lanes[2].h = 0.48;
+  if (F.region) { lanes[0].h -= 0.04; lanes[1].h -= 0.04; lanes.splice(2, 0, { name: t('lane.region'), h: 0.08, kind: 'region' }); }
   let y = 6; const H = h - 22;
   g.font = '11px sans-serif'; g.textBaseline = 'middle';
-  lanes.forEach((ln, li) => {
+  lanes.forEach(ln => {
     const lh = H * ln.h - 6, top = y; y += H * ln.h;
     g.fillStyle = '#10131a'; g.fillRect(L, top, w - L - Rm, lh);
     g.fillStyle = '#8b93a7'; g.textAlign = 'right'; g.fillText(ln.name, L - 6, top + lh / 2);
-    if (li === 0) {
+    if (ln.kind === 'com') {
       const Y = v => top + lh / 2 + (v / 1.5) * (lh / 2);
       // 重心事件區段
       (A.events || []).forEach((e, n) => {
@@ -550,7 +591,18 @@ function drawCharts() {
         pen ? g.lineTo(xx, yy) : g.moveTo(xx, yy); pen = true;
       }
       g.stroke();
-    } else if (li === 1) {
+    } else if (ln.kind === 'region') {
+      // 所在台：P1／P2／移動中／中央（跨兩台）
+      for (let q = i0; q <= i1; q++) {
+        const r = F.region[q]; if (!r) continue;
+        g.fillStyle = REGION_COL[r]; const xa = X(T[q]), xb = X(T[Math.min(q + 1, T.length - 1)]);
+        g.fillRect(xa, top + 1, Math.max(1, xb - xa + 0.5), lh - 2);
+      }
+      for (const mv of (S.A.pad_moves || [])) {
+        if (mv.t1 < t0 || mv.t0 > t1) continue;
+        g.fillStyle = '#fff'; g.fillRect(X(mv.t0), top, 1.5, lh);
+      }
+    } else if (ln.kind === 'hip') {
       const vals = []; for (let k = i0; k <= i1; k += stepN) if (F.hip_h[k] != null) vals.push(F.hip_h[k]);
       if (vals.length) {
         vals.sort((a, b) => a - b); const lo = vals[Math.floor(vals.length * 0.02)], hi = vals[Math.floor(vals.length * 0.98)] + 1e-6;
@@ -562,12 +614,13 @@ function drawCharts() {
         }
         g.stroke();
       }
-    } else if (li === 3) {
-      const rh = lh / 4;
-      ['L', 'D', 'U', 'R'].forEach((k, r) => {
-        const act = F.lights[ARROW_KEYS[k]];
-        g.fillStyle = '#6b7280'; g.textAlign = 'left'; g.fillText(ARROW_KEYS[k], L + 3, top + rh * r + rh / 2);
-        g.fillStyle = ARROW_COL[k];
+    } else if (ln.kind === 'lights') {
+      const rh = lh / Ly.keys.length;
+      if (Ly.dp) g.font = '9px sans-serif';
+      Ly.keys.forEach((k, r) => {
+        const act = F.lights[Ly.sym[k]] || [];
+        g.fillStyle = '#6b7280'; g.textAlign = 'left'; g.fillText(Ly.dp ? panelShort(Ly.sym[k]) : ARROW_KEYS[k], L + 3, top + rh * r + rh / 2);
+        g.fillStyle = Ly.col[k];
         for (let q = i0; q <= i1; q++) {
           const v = act[q]; if (!(v > 0.2)) continue;
           g.globalAlpha = Math.min(1, v); const xa = X(T[q]), xb = X(T[Math.min(q + 1, T.length - 1)]);
@@ -575,6 +628,7 @@ function drawCharts() {
         }
         g.globalAlpha = 1;
       });
+      g.font = '11px sans-serif';
     } else {
       const rh = lh / 2;
       ['L', 'R'].forEach((s, r) => {
@@ -582,12 +636,12 @@ function drawCharts() {
         for (const st of A.steps) {
           if (st.foot !== s) continue;
           const te = T[st.end]; if (te < t0 || st.t > t1) continue;
-          g.fillStyle = PANEL_COL[st.panel] || COL[s];
+          g.fillStyle = panelCol(st.panel) || COL[s];
           const xa = Math.max(L, X(st.t)), xb = Math.min(w - Rm, X(te));
           g.globalAlpha = st.from_light ? 0.6 : 1;
           g.fillRect(xa, top + rh * r + 2, Math.max(2, xb - xa), rh - 4); g.globalAlpha = 1;
           if (st.heel_up) { g.fillStyle = '#fff'; g.fillRect(xa, top + rh * r + 2, Math.max(2, xb - xa), 2); }
-          if (xb - xa > 12) { g.fillStyle = '#0b0d12'; g.textAlign = 'center'; g.fillText(st.panel?.[0] || '', (xa + xb) / 2, top + rh * r + rh / 2); }
+          if (xb - xa > 12) { g.fillStyle = '#0b0d12'; g.textAlign = 'center'; g.fillText(panelShort(st.panel), (xa + xb) / 2, top + rh * r + rh / 2); }
         }
       });
     }
@@ -621,7 +675,15 @@ function drawNow() {
   const o = F.com_obs[i], AN = A.view.com_axis_names;
   if (o != null && AN) parts.push(`${t('now.com', { axis: tv(AN.axis) })}<b>${dirTxt(o > 0 ? AN.pos : AN.neg)} ${Math.abs(o).toFixed(2)} ${t('unit.panel')}</b>` +
     (F.com_rel[i] != null ? t('now.rel', { d: dirTxt(F.com_rel[i] > 0 ? AN.pos : AN.neg), v: Math.abs(F.com_rel[i]).toFixed(2) }) : ''));
-  if (F.lights) { const on = 'LDUR'.split('').filter(k => F.lights[ARROW_KEYS[k]][i] > 0.4).map(k => ARROW_KEYS[k]); parts.push(`${t('now.lights')}：<b>${on.join(' ') || '—'}</b>`); }
+  const Ly = LAY();
+  if (F.lights) { const on = Ly.keys.filter(k => (F.lights[Ly.sym[k]] || [])[i] > 0.4).map(k => Ly.sym[k]); parts.push(`${t('now.lights')}：<b>${on.join(' ') || '—'}</b>`); }
+  if (F.region && F.region[i]) parts.push(`${t('now.region')}：<b>${t('reg.' + F.region[i])}</b>`);
+  const TK = F.trunk;
+  if (TK && TK.lean[i] != null) {
+    const ln = TK.lean[i], st_ = TK.sh_tilt[i];
+    parts.push(`${t('now.lean')} <b>${t(ln > 0 ? 'side.R' : 'side.L')} ${Math.abs(ln).toFixed(1)}°</b>` +
+      (st_ != null ? `・${t('now.shTilt', { s: t(st_ > 0 ? 'side.R' : 'side.L'), v: Math.abs(st_).toFixed(1) })}` : ''));
+  }
   const kn = ['L', 'R'].map(s => F.knee[s][i]).filter(v => v != null);
   if (kn.length && A.view.side_view) parts.push(`${t('now.knee')} ${kn.map(v => v.toFixed(0) + '°').join(' / ')}`);
   $('#nowInfo').innerHTML = parts.join('<br>');
@@ -639,10 +701,26 @@ function renderAdvice() {
     `<p class="note">${t('adv.note')}</p>`;
 }
 
+function padMovesHtml() {
+  const PM = S.A.pad_moves || [];
+  if (!PM.length) return '';
+  const nm = r => t('reg.' + r);
+  return `<h2 style="margin-top:14px">${t('pm.listTitle')}</h2><p class="note" style="margin-top:0">${t('pm.listDesc')}</p><div class="evlist">` +
+    PM.map((m, n) => `<div class="evrow pm" data-pm="${n}"><div class="evh"><b>${nm(m.frm)} → ${nm(m.to)}</b> ${fmt(m.t0)}` +
+      (m.lag_ms != null ? `　${t('pm.lagRow', { v: m.lag_ms })}` : '') + (m.trail_cm != null ? `・${t('pm.trailRow', { v: m.trail_cm })}` : '') +
+      (m.lean != null ? `・${t('pm.leanRow', { s: t(m.lean > 0 ? 'side.R' : 'side.L'), v: Math.abs(m.lean).toFixed(1) })}` : '') + '</div></div>').join('') + '</div>';
+}
+function bindPadMoves() {
+  document.querySelectorAll('.evrow.pm').forEach(row => row.onclick = () => {
+    const m = S.A.pad_moves[+row.dataset.pm];
+    S.ev = null; video.pause(); $('#rate').value = '0.25'; video.playbackRate = 0.25;
+    video.currentTime = Math.max(0, m.t0 - 0.6); renderEvSel(); redraw(); video.play();
+  });
+}
 function renderEvents() {
   const A = S.A, E = A.events || [], ST = A.event_stats || {}, AN = A.view.com_axis_names;
-  if (!E.length) { $('#tab-events').innerHTML = `<p class="note">${t('ev.none')}</p>`; return; }
-  let html = `<p class="note" style="margin-top:0">${t('ev.desc', { axis: tv(AN ? AN.axis : '-'), b: ST.baseline_cm ?? '-', n: E.length })}</p>`;
+  if (!E.length) { $('#tab-events').innerHTML = `<p class="note">${t('ev.none')}</p>` + padMovesHtml(); bindPadMoves(); return; }
+  let html = `<p class="note" style="margin-top:0">${t(A.calibration.mode === 'dp' ? 'ev.descDP' : 'ev.desc', { axis: tv(AN ? AN.axis : '-'), b: ST.baseline_cm ?? '-', n: E.length })}</p>`;
   html += '<div class="evlist">' + E.map((e, n) => {
     const causes = e.causes.length ? e.causes.map(c => `<span class="chip">${t('ev.c.' + c)}</span>`).join('') : `<span class="chip dim">${t('ev.noCause')}</span>`;
     const seq = e.seq.map(s => `<span class="sq ${s.foot}">${s.foot === 'L' ? t('short.L') : t('short.R')}${esc(s.panel || '')}${s.heel_up ? '˄' : ''}</span>`).join('');
@@ -660,8 +738,10 @@ function renderEvents() {
     html += `<h2 style="margin-top:14px">${t('ev.statsTitle')}</h2><p class="note" style="margin-top:0">${t('ev.statsDesc')}</p><table>` +
       ST.patterns.map(p => `<tr><td class="pat">${esc(p.pattern)}</td><td>${t('ev.pat', { cm: p.mean_cm, r: p.ratio, n: p.n })}</td></tr>`).join('') + '</table>';
   }
+  html += padMovesHtml();
   $('#tab-events').innerHTML = html;
-  document.querySelectorAll('.evrow').forEach(row => row.onclick = () => selectEvent(E[+row.dataset.k], +row.dataset.k));
+  document.querySelectorAll('.evrow:not(.pm)').forEach(row => row.onclick = () => selectEvent(E[+row.dataset.k], +row.dataset.k));
+  bindPadMoves();
 }
 function selectEvent(e, k) {
   S.ev = { ...e, k };
@@ -689,10 +769,52 @@ function renderMetrics() {
     [t('m.bounce'), M.bounce_pct, t('u.pctLeg')], [t('m.liftMed'), M.lift_cm_median, ' cm'], [t('m.liftP90'), M.lift_cm_p90, ' cm'],
     [t('m.liftL'), M.lift_cm_L, ' cm'], [t('m.liftR'), M.lift_cm_R, ' cm'], [t('m.knee'), M.knee_stance_deg, '°'],
     [t('m.heelUp'), M.heel_up_pct, ' %'], [t('m.edge'), M.edge_pct, ' %'], [t('m.off'), M.offpanel_pct, ' %'],
+    [t('m.gap'), S.A.calibration.mode === 'dp' ? S.A.calibration.gap : null, t('u.panel') + (S.A.calibration.gap ? `（≈${Math.round(S.A.calibration.gap * 2 * 28)} cm ${t('m.gapC')}）` : '')],
   ].filter(r => r[1] != null);
   let html = '<table>' + rows.map(([k, v, u]) => `<tr><td>${k}</td><td>${esc(v)}${u}</td></tr>`).join('') + '</table>';
   if (M.hand_hold) html += `<p class="note">${t('m.hold', { l: M.hand_hold.L ?? '-', r: M.hand_hold.R ?? '-' })}</p>`;
+  html += trunkTable(M);
   $('#tab-metrics').innerHTML = html;
+}
+// 體幹指標：SP 為整段一欄；DP 為 P1 台／P2 台／移動中／中央 的比較表
+function trunkTable(M) {
+  const T = M.trunk; if (!T) return '';
+  const cols = ['1', '2', 'm', 'c', 'all'].filter(g => T[g]);
+  if (!cols.length) return '';
+  const sgn = (v, pos, neg, d = 1, u = '') => v == null ? '–' : `${t(v > 0 ? pos : neg)} ${Math.abs(v).toFixed(d)}${u}`;
+  const num = (v, d = 2, u = '') => v == null ? '–' : `${(+v).toFixed(d)}${u}`;
+  const pct = v => v == null ? '–' : `${v > 0 ? '+' : ''}${v}%`;
+  const C = M.trunk_conf || {};
+  const rows = [
+    ['tr.lean', g => sgn(T[g].lean, 'side.R', 'side.L', 1, '°'), 'lean'],
+    ['tr.shTilt', g => sgn(T[g].sh_tilt, 'tr.rLow', 'tr.lLow', 1, '°'), 'sh_tilt'],
+    ['tr.head', g => sgn(T[g].head_off, 'side.R', 'side.L', 2), 'head_off'],
+    ['tr.wristL', g => num(T[g].wrist_L), 'wrist'],
+    ['tr.wristR', g => num(T[g].wrist_R), 'wrist'],
+    ['tr.twist', g => T[g].twist == null ? '–' : `${num(T[g].twist)}（${pct(T[g].twist_dev_pct)}）`, 'twist'],
+    ['tr.len', g => pct(T[g].trunk_len_dev_pct), 'trunk_len'],
+    ['tr.frames', g => `${(T[g].frames / (S.A.fps || 30)).toFixed(1)} ${t('u.sec').trim()}`, null],
+  ].filter(r => !(T.all && r[0] === 'tr.len'));                 // SP 只有一個區間：相對變化沒有意義
+  if (T.all) rows[5][1] = g => num(T[g].twist);
+  let html = `<h2 style="margin-top:14px">${t(M.trunk.all ? 'tr.titleSP' : 'tr.titleDP')}</h2><table class="cmp"><tr><th></th>` +
+    cols.map(g => `<th>${t('reg.' + g)}</th>`).join('') + `<th>${t('tr.conf')}</th></tr>` +
+    rows.map(([k, f, ck]) => `<tr><td>${t(k)}</td>${cols.map(g => `<td>${esc(f(g))}</td>`).join('')}<td class="dim">${ck && C[ck] ? t('conf.' + C[ck]) : ''}</td></tr>`).join('') + '</table>';
+  const ax = M.trunk_axis;
+  if (ax) {
+    const ang = a => Math.round(Math.atan2(Math.abs(a[1]), Math.abs(a[0])) * 180 / Math.PI);
+    html += `<p class="note">${t('tr.axisNote', { a: Object.entries(ax).map(([g, a]) => `${t('reg.' + g)} ${ang(a)}°`).join('・') })}</p>`;
+  }
+  html += `<p class="note">${t('tr.note')}</p>`;
+  const PM = M.pad_moves;
+  if (PM && PM.n) {
+    const d = PM.by_dir || {};
+    html += `<h2 style="margin-top:14px">${t('pm.title')}</h2><table>
+      <tr><td>${t('pm.count')}</td><td>${PM.n}${t('u.times')}（P1→P2 ${d['12'] ?? 0}・P2→P1 ${d['21'] ?? 0}・${t('pm.center')} ${(d['1c'] ?? 0) + (d['c1'] ?? 0) + (d['2c'] ?? 0) + (d['c2'] ?? 0)}）</td></tr>
+      <tr><td>${t('pm.lag')}</td><td>${PM.lag_ms != null ? PM.lag_ms + ' ms' : '–'}（${t('pm.measured', { n: PM.n_measured })}）</td></tr>
+      <tr><td>${t('pm.trail')}</td><td>${PM.trail_cm != null ? PM.trail_cm + ' cm' : '–'}</td></tr></table>
+      <p class="note">${t('pm.note')}</p>`;
+  }
+  return html;
 }
 function renderSteps() {
   const M = S.A.metrics; let html = '';
@@ -775,21 +897,27 @@ document.addEventListener('keydown', e => {
 // ───────── 手動校正 ─────────
 function setCalibUI(on) {
   $('#calibBar').hidden = !on; overlay.classList.toggle('calib', on);
+  $('#calibRotate').hidden = LAY().dp;                     // DP：兩台的方向由 8 點決定，不提供旋轉
   $('#calibBtn').textContent = on ? t('calib.active') : t('calib.btn');
 }
 $('#calibBtn').onclick = () => {
   if (!S.A || S.calib) return;
   video.pause();
-  const P = S.A.calibration.points;
+  const P = S.A.calibration.points, Ly = LAY();
   let C;
-  if (P && S.A.view.mode === 'homography') {
+  if (P && S.A.view.mode === 'homography' && !Ly.dp) {
     const Hp = padH();
     C = PAD_CORNERS.map(q => ap3(Hp, q));
+  } else if (P && S.A.view.mode === 'homography') {
+    // DP：四角由 8 點的整體單應矩陣算（只用一台的 4 個箭頭點外插到角落會嚴重變形）；之後兩台可各自拖
+    const Hp = padH();
+    C = Ly.pads.flatMap(([, cx]) => PAD_CORNERS.map(([x, y]) => ap3(Hp, [x + cx, y])));
   } else {
     const m = S.A.meta, F = S.A.frames, gl = F.ground.L[S.fi], gr = F.ground.R[S.fi];
     const c = gl && gr ? [(gl[0] + gr[0]) / 2, (gl[1] + gr[1]) / 2] : [m.width / 2, m.height * 0.8];
-    const r = m.width * 0.18;
-    C = [[c[0] - r, c[1] - r * 0.5], [c[0] + r, c[1] - r * 0.5], [c[0] + r, c[1] + r * 0.5], [c[0] - r, c[1] + r * 0.5]].map(toRef);
+    const r = m.width * (Ly.dp ? 0.11 : 0.18);
+    const quad = cx => [[cx - r, c[1] - r * 0.5], [cx + r, c[1] - r * 0.5], [cx + r, c[1] + r * 0.5], [cx - r, c[1] + r * 0.5]];
+    C = (Ly.dp ? [...quad(c[0] - 1.15 * r), ...quad(c[0] + 1.15 * r)] : quad(c[0])).map(toRef);
   }
   S.calib = { C, pick: null, footOff: (S.A.calibration.foot_offset || [0, 0]).slice() };
   setCalibUI(true); setClickPrompt(); redraw();
@@ -798,15 +926,26 @@ $('#calibRotate').onclick = () => { if (S.calib) { const C = S.calib.C; S.calib.
 
 // 箭頭中心（參考幀座標）⇄ 九宮格四角
 const CLICK_ORDER = ['L', 'D', 'U', 'R'];
-const arrowCenters = C => { const Hc = homog(PAD_CORNERS, C); return Object.fromEntries(CLICK_ORDER.map(k => [k, ap3(Hc, ARROW_POS[k])])); };
-const cornersFromCenters = P => { const Hp = homog(CLICK_ORDER.map(k => ARROW_POS[k]), CLICK_ORDER.map(k => P[k])); return PAD_CORNERS.map(q => ap3(Hp, q)); };
-// 對應點：踏板上的已知位置（16 個格線交點＋9 個板中心），在俯視圖選、在影片上點
-const PICK_TARGETS = [];
-for (const x of [-1.5, -0.5, 0.5, 1.5]) for (const y of [-1.5, -0.5, 0.5, 1.5]) PICK_TARGETS.push([x, y]);
-for (const x of [-1, 0, 1]) for (const y of [-1, 0, 1]) PICK_TARGETS.push([x, y]);
-const DEFAULT_PICKS = CLICK_ORDER.map(k => ARROW_POS[k]);
-const tkey = p => p.join(',');
-function nextDefaultTarget(pk) { return DEFAULT_PICKS.find(p => !pk.pairs[tkey(p)]) || null; }
+// 校正中的台：[前綴, 台中心 x]；S.calib.C 每台 4 個角（DP 共 8 個：0–3＝P1、4–7＝P2）
+const calibPads = () => LAY().pads;
+const padHc = pi => homog(PAD_CORNERS, S.calib.C.slice(4 * pi, 4 * pi + 4));     // 台的局部座標 → 參考幀
+const arrowCenters = C => Object.fromEntries(calibPads().flatMap(([pre], pi) => {
+  const Hc = homog(PAD_CORNERS, C.slice(4 * pi, 4 * pi + 4));
+  return CLICK_ORDER.map(k => [pre + k, ap3(Hc, ARROW_POS[k])]);
+}));
+const cornersFromCenters = (P, pre = '') => { const Hp = homog(CLICK_ORDER.map(k => ARROW_POS[k]), CLICK_ORDER.map(k => P[pre + k])); return PAD_CORNERS.map(q => ap3(Hp, q)); };
+// 對應點：踏板上的已知位置（每台 16 個格線交點＋9 個板中心；DP 為兩台），在俯視圖選、在影片上點
+function pickTargets() {
+  const out = [];
+  for (const [, cx] of calibPads()) {
+    for (const x of [-1.5, -0.5, 0.5, 1.5]) for (const y of [-1.5, -0.5, 0.5, 1.5]) out.push([cx + x, y]);
+    for (const x of [-1, 0, 1]) for (const y of [-1, 0, 1]) out.push([cx + x, y]);
+  }
+  return out;
+}
+const defaultPicks = () => { const Ly = LAY(); return Ly.keys.map(k => Ly.pos[k]); };
+const tkey = p => p.map(v => +v.toFixed(3)).join(',');
+function nextDefaultTarget(pk) { return defaultPicks().find(p => !pk.pairs[tkey(p)]) || null; }
 // 最小平方單應矩陣（n ≥ 4，含座標正規化）：src → dst
 function homogLSQ(src, dst) {
   const norm = P => {
@@ -830,9 +969,10 @@ function homogLSQ(src, dst) {
 function setClickPrompt() {
   const pk = S.calib && S.calib.pick;
   $('#calibPickDone').hidden = !pk;
-  if (!pk) { $('#calibHint').innerHTML = t('calib.hint'); return; }
+  const dp = LAY().dp;
+  if (!pk) { $('#calibHint').innerHTML = t(dp ? 'calib.hintDP' : 'calib.hint'); return; }
   const n = Object.keys(pk.pairs).length;
-  $('#calibHint').innerHTML = t('calib.pickPrompt', { n });
+  $('#calibHint').innerHTML = t(dp ? 'calib.pickPromptDP' : 'calib.pickPrompt', { n });
   $('#calibPickDone').textContent = t('calib.pickDone', { n });
   $('#calibPickDone').disabled = n < 4;
 }
@@ -849,7 +989,8 @@ $('#calibPickDone').onclick = () => {
   let sxx = 0, syy = 0, sxy = 0; for (const [x, y] of src) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
   const H = homogLSQ(src, dst);
   if (!H || (sxx * syy - sxy * sxy) / (src.length ** 2) < 0.02) { alert(t('calib.pickBad')); return; }
-  S.calib.C = PAD_CORNERS.map(q => ap3(H, q)); S.calib.pick = null; setClickPrompt(); redraw();
+  S.calib.C = calibPads().flatMap(([, cx]) => PAD_CORNERS.map(([x, y]) => ap3(H, [x + cx, y])));
+  S.calib.pick = null; setClickPrompt(); redraw();
 };
 document.addEventListener('keydown', e => {
   if (e.code === 'Escape' && S.calib && S.calib.pick) { S.calib.pick = null; setClickPrompt(); redraw(); }
@@ -857,8 +998,7 @@ document.addEventListener('keydown', e => {
 // 校正中拖曳俯視圖：只移動「腳的位置」（手動偏移，九宮格與亮燈判定區不動）
 padCv.addEventListener('pointerdown', e => {
   if (!S.calib || S.calib.pick) return;
-  const r = padCv.getBoundingClientRect();
-  S.padDrag = { x: e.clientX, y: e.clientY, o0: S.calib.footOff.slice(), sc: r.width / 4.2 };
+  S.padDrag = { x: e.clientX, y: e.clientY, o0: S.calib.footOff.slice(), sc: S.padView.sc };
   try { padCv.setPointerCapture(e.pointerId); } catch (_) { /* 模擬事件等 */ }
 });
 padCv.addEventListener('pointermove', e => {
@@ -870,10 +1010,10 @@ padCv.addEventListener('pointerup', () => { S.padDrag = null; });
 // 在俯視圖上選要對應的點
 padCv.addEventListener('pointerdown', e => {
   const pk = S.calib && S.calib.pick; if (!pk) return;
-  const r = padCv.getBoundingClientRect(), w = r.width, sc = w / 4.2;
-  const px = (e.clientX - r.left - w / 2) / sc, py = (e.clientY - r.top - w / 2) / sc;
+  const r = padCv.getBoundingClientRect(), sc = S.padView.sc;
+  const px = (e.clientX - r.left - r.width / 2) / sc, py = (e.clientY - r.top - r.height / 2) / sc;
   let best = null, bd = 0.35;
-  for (const p of PICK_TARGETS) { const d = Math.hypot(p[0] - px, p[1] - py); if (d < bd) { bd = d; best = p; } }
+  for (const p of pickTargets()) { const d = Math.hypot(p[0] - px, p[1] - py); if (d < bd) { bd = d; best = p; } }
   if (best) { pk.sel = best; redraw(); }
 });
 
@@ -907,10 +1047,13 @@ overlay.addEventListener('pointerdown', e => {
     const Q = S.calib.C.map(q => M.f(fromRef(q)));
     const AC = arrowCenters(S.calib.C);
     let best = null, bd = 18 / Z.k;
-    for (const k of CLICK_ORDER) { const [px, py] = M.f(fromRef(AC[k])); const d = Math.hypot(px - x, py - y); if (d < bd) { bd = d; best = { type: 'center', k }; } }
+    for (const k of Object.keys(AC)) { const [px, py] = M.f(fromRef(AC[k])); const d = Math.hypot(px - x, py - y); if (d < bd) { bd = d; best = { type: 'center', k }; } }
     Q.forEach(([px, py], k) => { const d = Math.hypot(px - x, py - y); if (d < bd) { bd = d; best = { type: 'corner', k }; } });
     if (best) S.drag = best;
-    else if (insideQuad([x, y], Q)) S.drag = { type: 'move', last: toRef(M.inv(x, y)) };
+    else {
+      const pi = calibPads().findIndex((_, i) => insideQuad([x, y], Q.slice(4 * i, 4 * i + 4)));
+      if (pi >= 0) S.drag = { type: 'move', pi, last: toRef(M.inv(x, y)) };
+    }
   }
   if (!S.drag && Z.k > 1.01) S.drag = { type: 'pan', sx: e.clientX, sy: e.clientY, zx: Z.x, zy: Z.y };
   if (S.drag) try { overlay.setPointerCapture(e.pointerId); } catch (_) { /* 模擬事件等 */ }
@@ -919,10 +1062,13 @@ overlay.addEventListener('pointermove', e => {
   if (!S.drag) return;
   const M = vmap(), [x, y] = localPt(e), d = S.drag;
   if (d.type === 'corner') S.calib.C[d.k] = toRef(M.inv(x, y));
-  else if (d.type === 'center') { const AC = arrowCenters(S.calib.C); AC[d.k] = toRef(M.inv(x, y)); S.calib.C = cornersFromCenters(AC); }
-  else if (d.type === 'move') {
+  else if (d.type === 'center') {
+    const AC = arrowCenters(S.calib.C); AC[d.k] = toRef(M.inv(x, y));
+    const pre = d.k.length > 1 ? d.k[0] : '', pi = calibPads().findIndex(([p]) => p === pre);
+    S.calib.C.splice(4 * pi, 4, ...cornersFromCenters(AC, pre));
+  } else if (d.type === 'move') {
     const cur = toRef(M.inv(x, y)), dx = cur[0] - d.last[0], dy = cur[1] - d.last[1];
-    S.calib.C = S.calib.C.map(([u, v]) => [u + dx, v + dy]); d.last = cur;
+    S.calib.C = S.calib.C.map(([u, v], k) => (k >> 2) === d.pi ? [u + dx, v + dy] : [u, v]); d.last = cur;
   } else if (d.type === 'pan') { Z.x = d.zx + e.clientX - d.sx; Z.y = d.zy + e.clientY - d.sy; applyZoom(); return; }
   redraw();
 });
@@ -939,8 +1085,7 @@ overlay.addEventListener('dblclick', () => { Z.k = 1; Z.x = Z.y = 0; applyZoom()
 $('#calibCancel').onclick = () => { S.calib = null; setCalibUI(false); setClickPrompt(); redraw(); };
 $('#calibApply').onclick = async () => {
   if (S.calib.pick) return;                              // 對應點還沒按「完成」
-  const Hc = homog(PAD_CORNERS, S.calib.C), points = {};
-  for (const k of 'LDUR') points[k] = ap3(Hc, ARROW_POS[k]);
+  const points = arrowCenters(S.calib.C);
   $('#calibApply').textContent = t('calib.applying');
   const r = await fetch(`/api/videos/${S.id}/calibration`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, foot_offset: S.calib.footOff }) });
   $('#calibApply').textContent = t('calib.apply');

@@ -89,6 +89,8 @@ td.pat { font-size: 15px; letter-spacing: 2px; }
 .card h2 { font-size: 14px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 td { padding: 4px 2px; border-bottom: 1px solid var(--line); }
+table.cmp th { font-weight: 500; font-size: 12px; color: var(--muted); text-align: left; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+table.cmp td { font-size: 12px; font-variant-numeric: tabular-nums; }
 td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
 .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
 
