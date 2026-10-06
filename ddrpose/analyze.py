@@ -1105,6 +1105,11 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         hold[s] = float((still & m).sum() / m.sum())
         hold_mask[s] = still & m
 
+    # DP：每幀在哪一台（P1／P2／移動中／中央）與台移動
+    from . import trunk as TR
+    region, moves = (TR.pad_regions(n, fps, steps, lay) if lay['mode'] == 'dp' and view['mode'] == 'homography'
+                     else (None, []))
+
     # 重心沿可觀測軸的位置（格），以及相對兩腳中點的位置
     com_obs = np.full(n, np.nan); com_rel = np.full(n, np.nan)
     axis_info = None
@@ -1122,14 +1127,49 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         else:
             rel_v = com_obs - fm @ com_axis
         com_rel[both] = rel_v[both]
+        if region is not None:
+            # DP：重心以「目前所在台」的中心為基準（移動中、中央以兩台中間為基準）
+            ctr = np.array([-lay['gap'] if r_ == '1' else (lay['gap'] if r_ == '2' else 0.0) for r_ in region])
+            com_obs = com_obs - ctr * com_axis[0]
+
+    # ── 體幹指標（只在看得到踏板時計算：需要踏板的左右方向） ──
+    trunk_sum, trunk_tw_base, trunk_ser, pad_moves = None, None, None, []
+    if view['mode'] == 'homography':
+        hip_ref = np.full((n, 2), np.nan)
+        okh = ~np.isnan(hip_g).any(1)
+        hip_ref[okh] = _warp(Mot[okh], hip_g[okh])
+        Hinv_ = np.linalg.inv(H)
+        right_img = np.full((n, 2), np.nan)
+        if okh.any():
+            q = _apply_h(H, hip_ref[okh])
+            a_ = _warp(np.linalg.inv(Mot[okh]), _apply_h(Hinv_, q))
+            b_ = _warp(np.linalg.inv(Mot[okh]), _apply_h(Hinv_, q + [0.25, 0.0]))
+            right_img[okh] = b_ - a_
+        right_img = np.c_[_interp_nan(right_img[:, 0].copy()), _interp_nan(right_img[:, 1].copy())]
+        if np.isfinite(right_img).all():
+            trunk_ser = TR.trunk_series(X, S, rel, vp, right_img, arm_est, _vert_dir)
+            trunk_sum, trunk_tw_base = TR.summarize(trunk_ser, region if region is not None else np.full(n, None, object),
+                                                    play, region is not None)
+        if region is not None and com_axis is not None:
+            shm_ = (X[:, 5] + X[:, 6]) / 2
+            def obs_x(p_img):
+                g_ = ground_at_feet_depth(p_img, gL, gR, vp)
+                o_ = np.full(n, np.nan)
+                m_ = ~np.isnan(g_).any(1)
+                o_[m_] = to_pad(_warp(Mot[m_], g_[m_])) @ com_axis
+                return o_
+            pad_moves = TR.move_lag(moves, t, fps, obs_x(hip), obs_x(shm_), abs(com_axis[0]) >= 0.7, PANEL_CM,
+                                    lean=trunk_ser['lean'] if trunk_ser else None)
 
     from .events import com_events
-    events, ev_stats = com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis_info, PANEL_CM)
+    events, ev_stats = com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis_info, PANEL_CM, lay=lay)
 
     metrics, advice = _metrics_and_advice(
         t, fps, view, steps, swings, com_obs, com_rel, axis_info, hip_h, leg_px / S_glob, knee, planted,
         side_view, hold, source, com_mode, play_s=play.sum() / fps, lay=lay)
     _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info, lay=lay)
+    if trunk_sum:
+        _trunk_advice(metrics, advice, trunk_sum, trunk_tw_base, pad_moves, lay)
 
     grid = _grid_lines(pts, view, lay) if pts is not None else []
     result = {
@@ -1165,6 +1205,12 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         'steps': steps, 'swings': swings, 'metrics': metrics, 'advice': advice,
         'events': events, 'event_stats': ev_stats,
     }
+    if region is not None:
+        result['frames']['region'] = [r_ if r_ in TR.REGIONS else None for r_ in region]
+        result['pad_moves'] = pad_moves
+    if trunk_ser is not None:
+        result['frames']['trunk'] = {k: [_r(v, 1 if k in ('lean', 'sh_tilt') else 2) for v in a_]
+                                     for k, a_ in trunk_ser.items()}
     (vid_dir / 'analysis.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
     return result
 
@@ -1353,6 +1399,110 @@ def _heel_and_event_advice(M, A, steps, events, ev_stats, axis, lay=SP_LAYOUT):
               '大きな踏み替え（←→・↑↓）では足だけを出して骨盤は中央に残す。同じ足で続けてパネルを変えるときは、'
               '反対の足でしっかり体重を支えてから動かします。'))
     A.sort(key=lambda a: order[a['level']])
+
+
+REG_TXT = {'all': ('整段', '全体'), '1': ('P1 台', 'P1 台'), '2': ('P2 台', 'P2 台'),
+           'm': ('移動中', '移動中'), 'c': ('中央（跨兩台）', '中央（2台またぎ）')}
+TRUNK_NOTE = ('（單一斜角鏡頭：角度只量得到畫面平面內的分量；傾斜／肩線信心中、頭位置中～低、扭轉低）',
+              '（斜めからのカメラ 1 台のため、角度は画面内の成分のみ。傾き・肩ラインは信頼度 中、頭の位置は 中〜低、ねじれは 低）')
+
+
+def _lr(v, pos=('右', '右'), neg=('左', '左')):
+    return pos if v > 0 else neg
+
+
+def _trunk_advice(M, A, T, tw_base, moves, lay):
+    """體幹指標的建議。T：區間別中位數（trunk.summarize）。"""
+    M['trunk'] = T
+    M['trunk_twist_base'] = tw_base
+    from .trunk import CONF
+    M['trunk_conf'] = CONF
+    dp = lay['mode'] == 'dp'
+    order = {'bad': 0, 'warn': 1, 'info': 2, 'good': 3}
+    if not dp:
+        a = T.get('all')
+        if a and a.get('lean') is not None:
+            lv = 'warn' if abs(a['lean']) > 5 else 'good'
+            d = _lr(a['lean'])
+            st = a.get('sh_tilt')
+            sd = _lr(st or 0)
+            _adv(A, '體幹', lv, ('體幹左右傾斜', '体幹の左右の傾き'),
+                 (f'骨盆→肩膀中點相對鉛直平均往{d[0]}傾 {abs(a["lean"]):.1f}°'
+                  + (f'，肩線相對骨盆線{sd[0]}肩低 {abs(st):.1f}°' if st is not None else '') + '。' + TRUNK_NOTE[0],
+                  f'骨盤→肩の中点は鉛直に対して平均 {abs(a["lean"]):.1f}° {d[1]}に傾いていました'
+                  + (f'。骨盤ラインに対して{sd[1]}肩が {abs(st):.1f}° 下がっています' if st is not None else '') + '。' + TRUNK_NOTE[1]),
+                 ('上半身長時間偏一側，另一側的腳會比較「虛」；想像頭頂往上拉，讓肩膀中點留在骨盆正上方。',
+                  '上半身がいつも片側に傾いていると、反対側の足が「浮いた」状態になりがちです。頭のてっぺんを上に引っぱられるイメージで、肩の中点を骨盤の真上に保ちましょう。')
+                 if lv != 'good' else ('體幹大致直立，維持即可。', '体幹はほぼまっすぐです。この調子で。'))
+        A.sort(key=lambda x: order[x['level']])
+        return
+    P1, P2 = T.get('1'), T.get('2')
+    # 各區間一覽
+    def row(g, r, j):
+        if not r:
+            return None
+        parts = []
+        if r.get('lean') is not None:
+            parts.append((f'傾斜 {_lr(r["lean"])[0]}{abs(r["lean"]):.1f}°', f'傾き {_lr(r["lean"])[1]}{abs(r["lean"]):.1f}°')[j])
+        if r.get('sh_tilt') is not None:
+            parts.append((f'{_lr(r["sh_tilt"])[0]}肩低 {abs(r["sh_tilt"]):.1f}°', f'{_lr(r["sh_tilt"])[1]}肩下がり {abs(r["sh_tilt"]):.1f}°')[j])
+        if r.get('head_off') is not None:
+            parts.append((f'頭偏{_lr(r["head_off"])[0]} {abs(r["head_off"]):.2f}', f'頭 {_lr(r["head_off"])[1]}寄り {abs(r["head_off"]):.2f}')[j])
+        if r.get('wrist_L') is not None and r.get('wrist_R') is not None:
+            parts.append((f'手腕外展 左 {r["wrist_L"]:.2f}／右 {r["wrist_R"]:.2f}', f'手首の開き 左 {r["wrist_L"]:.2f}／右 {r["wrist_R"]:.2f}')[j])
+        return REG_TXT[g][j] + '：' + ('、' if j == 0 else '・').join(parts)
+    lines = [[row(g, T.get(g), j) for g in ('1', '2', 'm', 'c') if T.get(g)] for j in (0, 1)]
+    if any(lines[0]):
+        _adv(A, '體幹', 'info', ('台別的體幹姿勢', '台ごとの体幹の姿勢'),
+             ('；'.join(x for x in lines[0] if x) + '。（頭、手腕以肩寬為 1）' + TRUNK_NOTE[0],
+              '；'.join(x for x in lines[1] if x) + '。（頭・手首は肩幅を 1 とした値）' + TRUNK_NOTE[1]),
+             ('到「指標」分頁看 P1／P2／移動中的比較表。兩台的姿勢差越小，代表換台後不需要重新找平衡。',
+              '「指標」タブで P1／P2／移動中の比較表を確認しましょう。台による姿勢の差が小さいほど、台を移ったあとにバランスを取り直す必要がありません。'))
+    if P1 and P2 and P1.get('lean') is not None and P2.get('lean') is not None:
+        d = P2['lean'] - P1['lean']
+        if abs(d) > 4:
+            g = '2' if abs(P2['lean']) > abs(P1['lean']) else '1'
+            r = T[g]
+            to_c = (r['lean'] < 0) == (g == '2')          # P2 往左／P1 往右＝往中央
+            dz = '往中央' if to_c else '往外側'
+            dj = '中央側へ' if to_c else '外側へ'
+            _adv(A, '體幹', 'warn', (f'在{REG_TXT[g][0]}上體幹{dz}傾', f'{REG_TXT[g][1]}では体幹が{dj}傾く'),
+                 (f'P1 台 {P1["lean"]:+.1f}°、P2 台 {P2["lean"]:+.1f}°（＋＝往右），差 {abs(d):.1f}°。' + TRUNK_NOTE[0],
+                  f'P1 台 {P1["lean"]:+.1f}°・P2 台 {P2["lean"]:+.1f}°（＋＝右）で、差は {abs(d):.1f}° です。' + TRUNK_NOTE[1]),
+                 ('只在一台上傾斜，多半是身體想「留在中間」或預備回到另一台；在那一台上刻意把骨盆和肩膀都放到該台中央正上方，'
+                  '練習：在那一台慢速踩交替串，確認介面的傾斜值接近另一台。',
+                  '片方の台でだけ傾くのは、体が「真ん中に残ろう」としているか、もう一方の台に戻る準備をしていることが多いです。'
+                  'その台では骨盤と肩を両方その台の中央の真上に置くことを意識しましょう。練習：その台で交互踏みをゆっくり踏み、傾きの値がもう一方の台に近づくか確認します。'))
+    if P1 and P2 and P1.get('head_off') is not None and P2.get('head_off') is not None and abs(P2['head_off'] - P1['head_off']) > 0.15:
+        _adv(A, '體幹', 'info', ('頭的位置隨台改變', '台によって頭の位置が変わる'),
+             (f'頭相對肩中點：P1 台 {P1["head_off"]:+.2f}、P2 台 {P2["head_off"]:+.2f}（肩寬為 1，＋＝右）。從背後拍，頭部點信心中～低。',
+              f'肩の中点に対する頭の位置：P1 台 {P1["head_off"]:+.2f}・P2 台 {P2["head_off"]:+.2f}（肩幅 1、＋＝右）。背後からの撮影のため頭の点の信頼度は 中〜低 です。'),
+             ('頭常會跟著視線（看螢幕或看另一台）偏；頭偏會把上半身帶著傾斜。視線固定在螢幕中央、下巴收在兩肩中間。',
+              '頭は視線（画面やもう一方の台）につられて寄りがちで、頭が寄ると上半身も一緒に傾きます。視線を画面の中央に固定し、あごを両肩の真ん中に保ちましょう。'))
+    for g in ('1', '2'):
+        r = T.get(g)
+        if r and r.get('wrist_L') is not None and r.get('wrist_R') is not None and abs(r['wrist_L'] - r['wrist_R']) > 0.3:
+            w = ('左', '左') if r['wrist_L'] > r['wrist_R'] else ('右', '右')
+            _adv(A, '體幹', 'info', (f'{REG_TXT[g][0]}上{w[0]}手往外張', f'{REG_TXT[g][1]}で{w[1]}手が外に開く'),
+                 (f'手腕離體幹中線：左 {r["wrist_L"]:.2f}、右 {r["wrist_R"]:.2f}（肩寬為 1）。看不到的手已排除。',
+                  f'体幹の中心線から手首までの距離：左 {r["wrist_L"]:.2f}・右 {r["wrist_R"]:.2f}（肩幅 1）。見えない手は除外しています。'),
+                 ('手臂往外張通常是在補償上半身的傾斜（當平衡桿用）。先修正傾斜，手自然會收回來。',
+                  '腕が外に開くのは、上半身の傾きを補う（バランスを取る）ためであることが多いです。まず傾きを直すと、手も自然に戻ります。'))
+    lag = [m['lag_ms'] for m in moves if m.get('lag_ms') is not None]
+    trail = [m['trail_cm'] for m in moves if m.get('trail_cm') is not None]
+    M['pad_moves'] = dict(n=len(moves), n_measured=len(lag),
+                          by_dir={k: sum(1 for m in moves if f"{m['frm']}{m['to']}" == k) for k in ('12', '21', '1c', 'c1', '2c', 'c2')},
+                          lag_ms=_r(np.median(lag), 0) if lag else None, trail_cm=_r(np.median(trail), 1) if trail else None)
+    if len(lag) >= 3:
+        ml, mt = float(np.median(lag)), (float(np.median(trail)) if trail else 0.0)
+        lv = 'warn' if ml > 80 or mt > 8 else 'good'
+        _adv(A, '體幹', lv, ('台移動時上半身的延遲', '台移動時の上半身の遅れ'),
+             (f'{len(lag)} 次台移動中，肩膀中點比骨盆晚 {ml:.0f} ms 到達移動距離的一半；骨盆走到一半時肩膀落後約 {mt:.0f} cm（中位數，只用可觀測方向，信心中）。',
+              f'{len(lag)} 回の台移動で、肩の中点は骨盤より {ml:.0f} ms 遅れて移動距離の半分に到達しました。骨盤が半分まで来た時点で、肩は約 {mt:.0f} cm 遅れています（中央値・測定できる方向のみ・信頼度 中）。'),
+             ('上半身留在原台，等於移動後還要把身體「拉過去」，下一步容易慢。移動時從胸口一起帶過去：先轉頭和胸，再讓骨盆跟上。',
+              '上半身が元の台に残ると、移動のあとで体を「引き寄せる」動きが必要になり、次の一歩が遅れがちです。移動するときは胸ごと持っていく意識で、頭と胸を先に向けてから骨盤を追いつかせましょう。')
+             if lv != 'good' else ('台移動時上半身與骨盆大致同步。', '台移動のとき、上半身と骨盤はほぼ同時に動けています。'))
+    A.sort(key=lambda x: order[x['level']])
 
 
 def _axis_names(a):

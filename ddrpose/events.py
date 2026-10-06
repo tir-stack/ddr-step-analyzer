@@ -8,6 +8,9 @@
   wide        大跨距（← 與 → 或 ↑ 與 ↓ 連續）
   bar_release 手離開扶桿
   fast        比平常密集
+
+DP：箭頭為「1P←」…「2P→」。交叉步改以左右腳落點的 x 判斷（左腳踩到右腳右邊的板）；
+大跨距＝同一台的 ←→／↑↓，或跨台連續踩；跨台移動另外由 trunk.pad_regions 列為「台移動」，不算重心異常。
 """
 from __future__ import annotations
 
@@ -22,8 +25,17 @@ def _r(x, d=3):
     return None if x is None or not np.isfinite(x) else round(float(x), d)
 
 
-def com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis, panel_cm, target=15, lo=10, hi=20):
+def _dp_x(p):
+    """DP 箭頭符號 → 踏板 x（以格為單位的相對值；台間距不影響左右順序）。"""
+    if not p or p[:2] not in ('1P', '2P'):
+        return None
+    return (-10 if p[0] == '1' else 10) + {'←': -1, '↓': 0, '↑': 0, '→': 1}.get(p[2:], 0)
+
+
+def com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis, panel_cm, target=15, lo=10, hi=20, lay=None):
     n = len(t)
+    dp = bool(lay and lay['mode'] == 'dp')
+    arrows = ARROWS4 if not dp else tuple(lay['sym'].values())
     v = np.asarray(com_obs, float)
     ok = np.isfinite(v)
     if ok.sum() < fps * 5 or axis is None:
@@ -86,14 +98,18 @@ def com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis, panel_cm, targe
         if not win:
             continue
         causes = []
-        if any((s['foot'] == 'L' and s.get('panel') == '→') or (s['foot'] == 'R' and s.get('panel') == '←') for s in win):
+        if dp:
+            cross = _dp_crossover(steps, win)
+        else:
+            cross = any((s['foot'] == 'L' and s.get('panel') == '→') or (s['foot'] == 'R' and s.get('panel') == '←') for s in win)
+        if cross:
             causes.append('crossover')
         if any(x['foot'] != y['foot'] and abs(x['t'] - y['t']) <= 0.06 for x, y in zip(win[:-1], win[1:])):
             causes.append('jump')
         if any(x['foot'] == y['foot'] and x.get('panel') != y.get('panel')
-               and x.get('panel') in ARROWS4 and y.get('panel') in ARROWS4 for x, y in zip(win[:-1], win[1:])):
+               and x.get('panel') in arrows and y.get('panel') in arrows for x, y in zip(win[:-1], win[1:])):
             causes.append('same_foot')
-        if any((x.get('panel'), y.get('panel')) in OPPOSITE for x, y in zip(win[:-1], win[1:])):
+        if any(_wide(x.get('panel'), y.get('panel'), dp) for x, y in zip(win[:-1], win[1:])):
             causes.append('wide')
         if hold_any is not None and hold_base > 0.6:
             h = hold_any[max(0, a - int(0.3 * fps)):b + 1]
@@ -110,7 +126,7 @@ def com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis, panel_cm, targe
                       heel_up=s.get('heel_up')) for s in win]))
 
     # 配置統計：每個三步配置之後 0.35 秒內的最大偏離，平均起來排序
-    arrows = [s for s in steps if s.get('panel') in ARROWS4]
+    arrows = [s for s in steps if s.get('panel') in arrows]
     resp = {}
     span = int(0.35 * fps)
     for k in range(2, len(arrows)):
@@ -132,3 +148,27 @@ def com_events(t, fps, com_obs, com_rel, steps, hold_mask, axis, panel_cm, targe
                  mean_resp_cm=_r(mean_all * panel_cm, 1), patterns=pats[:8], causes=cause_cnt,
                  types={tp: sum(1 for e in events if e['type'] == tp) for tp in ('travel', 'balance')})
     return events, stats
+
+
+def _wide(a, b, dp):
+    if not dp:
+        return (a, b) in OPPOSITE
+    if not a or not b or a[:2] not in ('1P', '2P') or b[:2] not in ('1P', '2P'):
+        return False
+    return (a[0] == b[0] and (a[2:], b[2:]) in OPPOSITE) or a[0] != b[0]
+
+
+def _dp_crossover(steps, win):
+    """DP 交叉步：某隻腳落地時，落點在另一隻腳（最近一次落地）的另一側。"""
+    last = {}
+    for s in steps:
+        if s['t'] > win[-1]['t']:
+            break
+        x = _dp_x(s.get('panel'))
+        if x is None:
+            continue
+        o = last.get('R' if s['foot'] == 'L' else 'L')
+        if s in win and o is not None and ((s['foot'] == 'L' and x > o) or (s['foot'] == 'R' and x < o)):
+            return True
+        last[s['foot']] = x
+    return False
