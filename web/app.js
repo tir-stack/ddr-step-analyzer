@@ -38,7 +38,7 @@ function renderList(keep = true) {
     const st = v.status === 'done' ? '' : v.status === 'error' ? t('st.error')
       : `（${t('st.' + v.status)}` + (v.progress ? ` ${Math.round(v.progress * 100)}%` : '') +
         (v.eta ? t('st.eta', { m: Math.ceil(v.eta / 60) }) : '') + '）';
-    o.textContent = (v.name || v.id) + st; o.disabled = v.status !== 'done';
+    o.textContent = (v.mode === 'dp' ? '[DP] ' : '') + (v.name || v.id) + st; o.disabled = v.status !== 'done';
     sel.appendChild(o);
   }
   const target = cur && S.list.find(v => v.id === cur) ? cur : (S.list.find(v => v.status === 'done') || {}).id;
@@ -956,15 +956,15 @@ $('#calibReset').onclick = async () => {
 $('#addBtn').onclick = () => { $('#addErr').textContent = ''; $('#addDlg').showModal(); };
 $('#addGo').onclick = async e => {
   e.preventDefault();
-  const file = $('#addFile').files[0], path = $('#addPath').value.trim(), q = $('#addQ').value;
+  const file = $('#addFile').files[0], path = $('#addPath').value.trim(), q = $('#addQ').value, mode = $('#addMode').value;
   let r;
   try {
     if (file) {
-      const fd = new FormData(); fd.append('file', file); fd.append('quality', q);
+      const fd = new FormData(); fd.append('file', file); fd.append('quality', q); fd.append('mode', mode);
       $('#addErr').textContent = t('dlg.uploading');
       r = await fetch('/api/upload', { method: 'POST', body: fd });
     } else if (path) {
-      r = await fetch('/api/videos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, quality: q }) });
+      r = await fetch('/api/videos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, quality: q, mode }) });
     } else { $('#addErr').textContent = t('dlg.need'); return; }
     if (!r.ok) { $('#addErr').textContent = (await r.json()).detail || t('dlg.fail'); return; }
     $('#addDlg').close(); loadList();

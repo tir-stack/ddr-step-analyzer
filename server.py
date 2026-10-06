@@ -87,10 +87,17 @@ def _new_id(name: str) -> str:
     return vid
 
 
-def _enqueue(source: Path, quality: str) -> str:
+def _read_calib(d: Path) -> dict:
+    f = d / 'calib.json'
+    return json.loads(f.read_text(encoding='utf-8')) if f.exists() else {}
+
+
+def _enqueue(source: Path, quality: str, mode: str = 'sp') -> str:
     vid = _new_id(source.name)
     (DATA / vid).mkdir(parents=True)
-    _set(vid, source=str(source), name=source.name, quality=quality, status='queued', progress=0)
+    if mode == 'dp':                     # 遊玩模式存在 calib.json（SP 不寫，維持原狀）
+        (DATA / vid / 'calib.json').write_text(json.dumps({'mode': 'dp'}), encoding='utf-8')
+    _set(vid, source=str(source), name=source.name, quality=quality, mode=mode, status='queued', progress=0)
     work.put(vid)
     return vid
 
@@ -109,7 +116,9 @@ def _status(d: Path) -> dict:
         job.setdefault('name', Path(meta['source']).name)
         job['duration'] = meta.get('duration')
     job['id'] = d.name
-    job['manual'] = (d / 'calib.json').exists()
+    cal = _read_calib(d)
+    job['manual'] = bool(cal.get('points'))
+    job['mode'] = 'dp' if cal.get('mode') == 'dp' else 'sp'
     return job
 
 
@@ -118,6 +127,7 @@ def _status(d: Path) -> dict:
 class AddReq(BaseModel):
     path: str
     quality: str = 'accurate'
+    mode: str = 'sp'                           # 'sp'（單人）或 'dp'（雙打）
 
 
 class CalibReq(BaseModel):
@@ -138,16 +148,20 @@ def add_video(req: AddReq):
         raise HTTPException(400, f'ファイルが見つかりません／找不到檔案：{src}')
     if req.quality not in P.POSE_MODELS:
         raise HTTPException(400, 'quality は accurate か fast／quality 必須是 accurate 或 fast')
-    return {'id': _enqueue(src, req.quality)}
+    if req.mode not in ('sp', 'dp'):
+        raise HTTPException(400, 'mode は sp か dp／mode 必須是 sp 或 dp')
+    return {'id': _enqueue(src, req.quality, req.mode)}
 
 
 @app.post('/api/upload')
-async def upload(file: UploadFile = File(...), quality: str = Form('accurate')):
+async def upload(file: UploadFile = File(...), quality: str = Form('accurate'), mode: str = Form('sp')):
+    if mode not in ('sp', 'dp'):
+        raise HTTPException(400, 'mode は sp か dp／mode 必須是 sp 或 dp')
     UPLOADS.mkdir(parents=True, exist_ok=True)
     dst = UPLOADS / Path(file.filename or 'video.mp4').name
     with dst.open('wb') as out:
         shutil.copyfileobj(file.file, out, length=8 << 20)
-    return {'id': _enqueue(dst, quality)}
+    return {'id': _enqueue(dst, quality, mode)}
 
 
 def _vdir(vid: str) -> Path:
@@ -171,9 +185,12 @@ def get_analysis(vid: str):
 @app.post('/api/videos/{vid}/calibration')
 def set_calibration(vid: str, req: CalibReq):
     d = _vdir(vid)
-    if set(req.points) != set('LDUR') or any(len(v) != 2 for v in req.points.values()):
-        raise HTTPException(400, 'L/D/U/R の 4 点が必要です／需要 L/D/U/R 四個點')
-    cal = {'points': req.points}
+    dp = _read_calib(d).get('mode') == 'dp'
+    need = {p + k for p in '12' for k in 'LDUR'} if dp else set('LDUR')
+    if set(req.points) != need or any(len(v) != 2 for v in req.points.values()):
+        raise HTTPException(400, '1L〜2R の 8 点が必要です／需要 1L〜2R 八個點' if dp
+                            else 'L/D/U/R の 4 点が必要です／需要 L/D/U/R 四個點')
+    cal = {'mode': 'dp', 'points': req.points} if dp else {'points': req.points}
     if req.foot_offset and len(req.foot_offset) == 2:
         cal['foot_offset'] = req.foot_offset
     (d / 'calib.json').write_text(json.dumps(cal), encoding='utf-8')
@@ -184,7 +201,10 @@ def set_calibration(vid: str, req: CalibReq):
 @app.delete('/api/videos/{vid}/calibration')
 def reset_calibration(vid: str):
     d = _vdir(vid)
-    (d / 'calib.json').unlink(missing_ok=True)
+    if _read_calib(d).get('mode') == 'dp':     # DP：只清掉手動的點，保留模式
+        (d / 'calib.json').write_text(json.dumps({'mode': 'dp'}), encoding='utf-8')
+    else:
+        (d / 'calib.json').unlink(missing_ok=True)
     A.analyze(d)
     return FileResponse(d / 'analysis.json', media_type='application/json')
 
