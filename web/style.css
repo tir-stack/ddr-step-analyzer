@@ -9,7 +9,7 @@
 [hidden] { display: none !important; }
 #offline { position: fixed; top: 0; left: 0; right: 0; z-index: 10; background: #7f1d1d; color: #fff; text-align: center; padding: 8px; font-weight: 600; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-  font: 14px/1.5 "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  font: 14px/1.5 Meiryo, "メイリオ", "Microsoft JhengHei", system-ui, sans-serif; }
 button, select, input { font: inherit; color: inherit; }
 button, select { background: #222734; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 button:hover { background: #2b3242; }

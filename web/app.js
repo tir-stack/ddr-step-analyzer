@@ -3,6 +3,7 @@ const $ = s => document.querySelector(s);
 const video = $('#video'), overlay = $('#overlay'), padCv = $('#pad'), chartCv = $('#charts');
 
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const FONT = 'Meiryo, "メイリオ", "Microsoft JhengHei", sans-serif';   // キャンバス文字（本文と同じ）
 const COL = { L: css('--L'), R: css('--R'), com: css('--com'), ev: '#f472b6' };
 const PANEL_COL = { '←': css('--aL'), '↓': css('--aD'), '↑': css('--aU'), '→': css('--aR'),
   '中央': '#9ca3af', '中間列': '#9ca3af', '角落': '#f59e0b', '板外': '#ef4444', '台間': '#ef4444' };
@@ -256,7 +257,7 @@ function drawOverlay() {
       g.beginPath(); g.moveTo(...M.f(e.sh)); g.lineTo(...M.f(e.e)); g.lineTo(...M.f(e.w)); g.stroke(); g.setLineDash([]);
       const [x, y] = M.f(e.w); g.globalAlpha = 1; g.fillStyle = sd === 'L' ? COL.L : COL.R;
       g.beginPath(); g.arc(x, y, 4, 0, 7); g.fill();
-      g.font = '11px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(t('arm.est'), x + 7, y);
+      g.font = `11px ${FONT}`; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(t('arm.est'), x + 7, y);
     }
     g.globalAlpha = 1;
     for (const [a, b, sd] of BONES) {
@@ -319,7 +320,7 @@ function drawOverlay() {
           const [x, y] = scr([ax + dx, ay + dy]); n ? g.lineTo(x, y) : g.moveTo(x, y); });
         g.closePath(); g.fillStyle = ARROW_COL[k]; g.globalAlpha = 0.28; g.fill(); g.globalAlpha = 1;
         const [x, y] = scr([ax, ay]);
-        g.fillStyle = '#fff'; g.font = `bold ${Math.round(18 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillStyle = '#fff'; g.font = `bold ${Math.round(18 * zk)}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
         g.fillText(ARROW_KEYS[k], x, y);
       }
       g.strokeStyle = '#fff'; g.lineWidth = 1.6 * zk;
@@ -328,7 +329,7 @@ function drawOverlay() {
         for (let u = -1.5; u <= 1.5001; u += 0.25) { const [x, y] = scr(vert ? [v, u] : [u, v]); u === -1.5 ? g.moveTo(x, y) : g.lineTo(x, y); }
         g.stroke();
       }
-      const [sx, sy] = scr([0, -1.9]); g.fillStyle = '#facc15'; g.font = `${Math.round(12 * zk)}px sans-serif`;
+      const [sx, sy] = scr([0, -1.9]); g.fillStyle = '#facc15'; g.font = `${Math.round(12 * zk)}px ${FONT}`;
       g.fillText(pre ? `${pre}P・${t('pad.screen')}` : t('pad.screen'), sx, sy);
     });
     for (const q of S.calib.C) {
@@ -342,7 +343,7 @@ function drawOverlay() {
       const a = k.slice(-1), [x, y] = M.f(fromRef(AC[k]));
       g.fillStyle = ARROW_COL[a]; g.strokeStyle = '#fff'; g.lineWidth = 2 * zk;
       g.beginPath(); g.arc(x, y, 11 * zk, 0, 7); g.fill(); g.stroke();
-      g.fillStyle = '#000'; g.font = `bold ${Math.round(13 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#000'; g.font = `bold ${Math.round(13 * zk)}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.fillText(ARROW_KEYS[a], x, y + 0.5);
     }
   }
@@ -353,7 +354,7 @@ function drawOverlay() {
       const [x, y] = M.f(fromRef(p));
       g.strokeStyle = '#facc15'; g.lineWidth = 3 * zk;
       g.beginPath(); g.moveTo(x - 10 * zk, y); g.lineTo(x + 10 * zk, y); g.moveTo(x, y - 10 * zk); g.lineTo(x, y + 10 * zk); g.stroke();
-      g.fillStyle = '#fff'; g.font = `bold ${Math.round(14 * zk)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#fff'; g.font = `bold ${Math.round(14 * zk)}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.fillText(String(n + 1), x + 14 * zk, y - 12 * zk);
     });
   }
@@ -379,7 +380,7 @@ function armEstimate(K, sc, side, W, H, forced = null) {
   return { hide: [el, wr], sh: K[sh], e, w: [e[0] + vw[0], e[1] + vw[1]] };
 }
 function label(g, [x, y], txt, col, alpha = 1) {
-  g.globalAlpha = alpha; g.fillStyle = col; g.font = 'bold 16px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.globalAlpha = alpha; g.fillStyle = col; g.font = `bold 16px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText(txt, x, y); g.globalAlpha = 1;
 }
 
@@ -435,7 +436,7 @@ function drawPad() {
     if (lit) { const [x, y] = P0(ax - 0.5, ay - 0.5); g.fillStyle = Ly.col[k]; g.globalAlpha = 0.35; g.fillRect(x + 1, y + 1, sc - 2, sc - 2); g.globalAlpha = 1; }
     drawArrow(g, P0(ax, ay), sc * 0.28, a, Ly.col[k]);
   }
-  g.fillStyle = '#6b7280'; g.font = '11px sans-serif'; g.textAlign = 'center';
+  g.fillStyle = '#6b7280'; g.font = `11px ${FONT}`; g.textAlign = 'center';
   g.fillText(t('pad.screen'), w / 2, 12);
   if (Ly.dp) for (const [pre, cx] of Ly.pads) { const [x] = P0(cx, 0); g.fillText(`${pre}P`, x, cy0 + 1.5 * sc + 12); }
   if (A.view.mode === 'none' && !(S.calib && S.calib.pick)) { g.fillStyle = '#9ca3af'; g.fillText(t('pad.noCalib'), w / 2, cy0); return; }
@@ -446,7 +447,7 @@ function drawPad() {
       g.beginPath(); g.arc(x, y, k >= 0 ? 8 : 5, 0, 7);
       g.fillStyle = k >= 0 ? '#facc15' : '#e5e7eb'; g.globalAlpha = k >= 0 ? 1 : 0.55; g.fill(); g.globalAlpha = 1;
       if (isCur) { g.strokeStyle = '#facc15'; g.lineWidth = 3; g.strokeRect(x - 11, y - 11, 22, 22); }
-      if (k >= 0) { g.fillStyle = '#000'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(k + 1), x, y + 0.5); }
+      if (k >= 0) { g.fillStyle = '#000'; g.font = `bold 10px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(k + 1), x, y + 0.5); }
     }
     return;
   }
@@ -471,7 +472,7 @@ function drawPad() {
       const pose = footPose(s, A.shoeLen);
       drawShoe(g, PF, pose, s.foot, A.shoeLen, { alpha: 0.45, heelUp: s.heel_up, outline: 'rgba(255,255,255,.5)' });
       const [x, y] = PF(pose.cx, pose.cy);
-      g.fillStyle = '#fff'; g.font = 'bold 11px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#fff'; g.font = `bold 11px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.fillText(String(n + 1), x, y);
     });
     const f0 = Math.max(0, ev.f0 - 15), f1 = Math.min(F.t.length - 1, ev.f1 + 15);
@@ -507,7 +508,7 @@ function drawPad() {
   }
   if (S.calib && !S.calib.pick) {                          // 目前的手動腳位置偏移
     const [ox, oy] = S.calib.footOff;
-    if (Math.hypot(ox, oy) > 0.005) { g.fillStyle = '#facc15'; g.font = '11px sans-serif'; g.textAlign = 'right';
+    if (Math.hypot(ox, oy) > 0.005) { g.fillStyle = '#facc15'; g.font = `11px ${FONT}`; g.textAlign = 'right';
       g.fillText(t('pad.footOff', { x: (ox * 28).toFixed(0), y: (oy * 28).toFixed(0) }), w - 6, (Ly.dp ? h : w) - 6); }
   }
   // 重心
@@ -535,7 +536,7 @@ function drawPad() {
     const [x, y] = P(...comXY(c));
     g.fillStyle = COL.com; g.strokeStyle = '#000'; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); g.stroke();
   }
-  if (side) { g.fillStyle = '#9ca3af'; g.font = '11px sans-serif'; g.fillText(t('pad.sideNote'), w / 2, w - 6); }
+  if (side) { g.fillStyle = '#9ca3af'; g.font = `11px ${FONT}`; g.fillText(t('pad.sideNote'), w / 2, w - 6); }
 }
 function drawArrow(g, [x, y], r, k, col) {
   const ang = { U: 0, R: Math.PI / 2, D: Math.PI, L: -Math.PI / 2 }[k];
@@ -564,7 +565,7 @@ function drawCharts() {
   if (F.lights) lanes.push({ name: t('lane.lights'), h: 0.26, kind: 'lights' }); else lanes[2].h = 0.48;
   if (F.region) { lanes[0].h -= 0.04; lanes[1].h -= 0.04; lanes.splice(2, 0, { name: t('lane.region'), h: 0.08, kind: 'region' }); }
   let y = 6; const H = h - 22;
-  g.font = '11px sans-serif'; g.textBaseline = 'middle';
+  g.font = `11px ${FONT}`; g.textBaseline = 'middle';
   lanes.forEach(ln => {
     const lh = H * ln.h - 6, top = y; y += H * ln.h;
     g.fillStyle = '#10131a'; g.fillRect(L, top, w - L - Rm, lh);
@@ -616,7 +617,7 @@ function drawCharts() {
       }
     } else if (ln.kind === 'lights') {
       const rh = lh / Ly.keys.length;
-      if (Ly.dp) g.font = '9px sans-serif';
+      if (Ly.dp) g.font = `9px ${FONT}`;
       Ly.keys.forEach((k, r) => {
         const act = F.lights[Ly.sym[k]] || [];
         g.fillStyle = '#6b7280'; g.textAlign = 'left'; g.fillText(Ly.dp ? panelShort(Ly.sym[k]) : ARROW_KEYS[k], L + 3, top + rh * r + rh / 2);
@@ -628,7 +629,7 @@ function drawCharts() {
         }
         g.globalAlpha = 1;
       });
-      g.font = '11px sans-serif';
+      g.font = `11px ${FONT}`;
     } else {
       const rh = lh / 2;
       ['L', 'R'].forEach((s, r) => {
