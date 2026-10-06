@@ -698,7 +698,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         K, S = _swap_legs(K, S, np.ones(len(K), bool))
     Mot, ref_frame, mot_ok = _load_motion(vid_dir, n, meta['width'])
     # 非遊玩段（拿起手機拍結算畫面、選歌等）不分析：當作沒抓到人
-    play = _play_mask(K, S, valid, Mot, mot_ok, fps)
+    play = _play_mask(K, S, valid, Mot, mot_ok, fps, dp=(calib or {}).get('mode') == 'dp')
     valid = valid & play
     S = np.where(play[:, None], S, 0.0)
     K, S, swapped = fix_left_right(K, S, valid)
@@ -1190,8 +1190,10 @@ PLAY_GAP_S = 3.0     # 遊玩中短暫抓不到腳（遮擋）不算中斷
 PLAY_MIN_S = 5.0     # 太短的片段不算遊玩
 
 
-def _play_mask(K, S, valid, Mot, mot_ok, fps):
-    """遊玩中的幀：有抓到人、鏡頭對得上參考幀、雙腳在平常站的範圍內（參考幀座標，約 1.5 條腿長內）。"""
+def _play_mask(K, S, valid, Mot, mot_ok, fps, dp=False):
+    """遊玩中的幀：有抓到人、鏡頭對得上參考幀、雙腳在平常站的範圍內（參考幀座標，約 1.5 條腿長內）。
+    DP：玩家會在兩台之間移動，改以「兩台全體」為範圍：沿雙腳分佈的主軸取 5–95 百分位再各放寬 1 條腿長，
+    與主軸垂直的方向仍為 1.5 條腿長。"""
     n = len(K)
     feet = [LEG[s][p] for s in LEG for p in ('heel', 'bt', 'st')]
     fs = S[:, feet].min(1) >= 0.3
@@ -1203,7 +1205,19 @@ def _play_mask(K, S, valid, Mot, mot_ok, fps):
     ref = np.full((n, 2), np.nan)
     ref[raw] = _warp(Mot[raw], foot[raw])
     d = np.linalg.norm(ref - np.nanmedian(ref[raw], 0), axis=1)
-    raw &= d < 1.5 * leg
+    if dp:
+        core = raw & (d < 3.0 * leg)                 # 先排除明顯離開踏板的幀，再估兩台的範圍
+        if core.sum() >= 10:
+            q = ref[core]; c = q.mean(0)
+            ax, ox = np.linalg.svd(q - c, full_matrices=False)[2]
+            a, b = (ref - c) @ ax, (ref - c) @ ox
+            lo, hi = np.percentile(a[core], [5, 95])
+            b0 = np.median(b[core])
+            raw &= (a > lo - leg) & (a < hi + leg) & (np.abs(b - b0) < 1.5 * leg)
+        else:
+            raw &= d < 1.5 * leg
+    else:
+        raw &= d < 1.5 * leg
     # 補短缺口、去掉太短的片段
     play = raw.copy()
     idx = np.where(raw)[0]
