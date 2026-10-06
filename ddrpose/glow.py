@@ -52,13 +52,14 @@ def glow_map(vid_dir: str | Path, M, orig_w: int, play=None):
     return F, s, Fr
 
 
-def panel_lights(Fr, s, Hinv):
-    """每幀四塊箭頭板區域內的亮燈比例 → {箭頭: (N,) 0–1（以該板 99 百分位正規化）}。
-    Hinv：踏板座標 → 參考幀影像（原始解析度）。"""
-    from .analyze import ARROWS, _apply_h
+def panel_lights(Fr, s, Hinv, lay=None):
+    """每幀各箭頭板區域內的亮燈比例 → {箭頭: (N,) 0–1（以該板 99 百分位正規化）}。
+    Hinv：踏板座標 → 參考幀影像（原始解析度）。lay：踏板配置（預設 SP 四塊）。"""
+    from .analyze import SP_LAYOUT, _apply_h
+    lay = lay or SP_LAYOUT
     h, w = Fr.shape[1:]
     out = {}
-    for k, (ax, ay) in ARROWS.items():
+    for k, (ax, ay) in lay['arrows'].items():
         e = 0.55
         quad = _apply_h(Hinv, [[ax - e, ay - e], [ax + e, ay - e], [ax + e, ay + e], [ax - e, ay + e]]) * s / CELL
         mask = np.zeros((h, w), np.uint8)
@@ -84,9 +85,10 @@ def light_onsets(lights, on=0.4, off=0.2):
     return sorted(out)
 
 
-def lit_at_step(lights, a, foot_pad_pts=None, win=(4, 5)):
+def lit_at_step(lights, a, foot_pad_pts=None, win=(4, 5), lay=None):
     """落地幀 a 附近「剛亮起來」的箭頭板；多塊同時亮起時取離這隻腳最近的。"""
-    from .analyze import ARROWS, ARROW_SYM
+    from .analyze import SP_LAYOUT
+    lay = lay or SP_LAYOUT
     best = []
     for k, act in lights.items():
         lo, hi = max(0, a - win[0]), min(len(act), a + win[1] + 1)
@@ -105,7 +107,7 @@ def lit_at_step(lights, a, foot_pad_pts=None, win=(4, 5)):
         v = tp - hl
         fs = (hl - 0.3 * v) + np.linspace(0, 1, 9)[:, None] * (1.6 * v)
         def dist(k):
-            c = np.array(ARROWS[k])
+            c = np.array(lay['arrows'][k])
             return float(np.min(np.maximum(np.abs(fs[:, 0] - c[0]), np.abs(fs[:, 1] - c[1]))) - 0.5)
         best = [kv for kv in best if dist(kv[0]) <= 0.6]
         if not best:
@@ -113,7 +115,7 @@ def lit_at_step(lights, a, foot_pad_pts=None, win=(4, 5)):
         best.sort(key=lambda kv: dist(kv[0]))
     else:
         best.sort(key=lambda kv: -kv[1])
-    return ARROW_SYM[best[0][0]]
+    return lay['sym'][best[0][0]]
 
 
 def _wkmeans(X, w, init, it=30):

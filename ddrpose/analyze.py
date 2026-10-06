@@ -26,6 +26,24 @@ ARROWS = {'L': (-1.0, 0.0), 'D': (0.0, 1.0), 'U': (0.0, -1.0), 'R': (1.0, 0.0)}
 ARROW_SYM = {'L': '←', 'D': '↓', 'U': '↑', 'R': '→'}
 CELL_NAME = {(-1, 0): '←', (1, 0): '→', (0, -1): '↑', (0, 1): '↓', (0, 0): '中央'}
 
+# DP（雙打）：P1 台中心在 (-gap, 0)、P2 台中心在 (+gap, 0)，各台箭頭在台中心 ±1。
+# gap 預設為實機估計值（一台 3 格＋台間框約 0.5 格），有 8 個箭頭點時以重投影誤差擬合。
+DP_GAP = 1.75
+DP_GAP_SEARCH = np.arange(1.40, 2.4001, 0.01)
+
+
+def make_layout(mode='sp', gap=DP_GAP):
+    """踏板配置：keys（箭頭代碼）、arrows（踏板座標）、sym（顯示用符號）。SP 與原本的 ARROWS 完全相同。"""
+    if mode != 'dp':
+        return {'mode': 'sp', 'keys': ('L', 'D', 'U', 'R'), 'arrows': ARROWS, 'sym': ARROW_SYM, 'gap': 0.0}
+    keys = tuple(p + k for p in '12' for k in 'LDUR')
+    arrows = {p + k: (x + (-gap if p == '1' else gap), y) for p in '12' for k, (x, y) in ARROWS.items()}
+    sym = {p + k: f'{p}P{ARROW_SYM[k]}' for p in '12' for k in 'LDUR'}
+    return {'mode': 'dp', 'keys': keys, 'arrows': arrows, 'sym': sym, 'gap': float(gap)}
+
+
+SP_LAYOUT = make_layout('sp')
+
 # 高階玩家（15 級以上）門檻；[良好上限, 注意上限]，超過注意上限即「需改善」
 TH = {
     'com_sway': (0.22, 0.35),        # 重心左右晃動標準差（格）
@@ -268,10 +286,32 @@ def _is_side(P, f):
     return sa < 0.25 * sb
 
 
-def _h_from_points(pts):
-    src = np.float32([pts[k] for k in 'LDUR'])
-    dst = np.float32([ARROWS[k] for k in 'LDUR'])
-    return cv2.getPerspectiveTransform(src, dst)
+def _h_from_points(pts, lay=SP_LAYOUT):
+    if lay['mode'] != 'dp':
+        src = np.float32([pts[k] for k in 'LDUR'])
+        dst = np.float32([ARROWS[k] for k in 'LDUR'])
+        return cv2.getPerspectiveTransform(src, dst)
+    # DP：8 點最小平方
+    src = np.float32([pts[k] for k in lay['keys']])
+    dst = np.float32([lay['arrows'][k] for k in lay['keys']])
+    H, _ = cv2.findHomography(src, dst, 0)
+    return H
+
+
+def _fit_gap(pts):
+    """DP：由 8 個箭頭點（影像）擬合台間距 gap（格）：使影像上的重投影誤差最小。"""
+    best = None
+    img = np.array([pts[k] for k in make_layout('dp')['keys']], float)
+    for g in DP_GAP_SEARCH:
+        lay = make_layout('dp', g)
+        H = _h_from_points(pts, lay)
+        if H is None:
+            continue
+        back = _apply_h(np.linalg.inv(H), [lay['arrows'][k] for k in lay['keys']])
+        err = float(np.sqrt(((back - img) ** 2).sum(1).mean()))
+        if best is None or err < best[0]:
+            best = (err, float(g))
+    return round(best[1], 2) if best else DP_GAP
 
 
 def auto_homography(P, f):
@@ -461,9 +501,17 @@ def _foot_samples(hl, tp, eh=0.0, et=0.0, n=9):
     return a + np.linspace(0, 1, n)[:, None] * (b - a)
 
 
-def classify_foot(hp, tp, eh=0.0, et=0.0, target=None, from_ext=True, heel_up=False):
+def _dp_pad_of(x, lay):
+    """DP：踏板 x 座標屬於哪一台（'1' 或 '2'）。"""
+    return '1' if x < 0 else '2'
+
+
+def classify_foot(hp, tp, eh=0.0, et=0.0, target=None, from_ext=True, heel_up=False, lay=SP_LAYOUT):
     """整隻腳壓到哪塊箭頭板（高手常只用腳跟踩 ↓、腳尖踩 ↑，所以不能只看前腳掌）。
-    target：已知（亮燈）的箭頭，改為計算腳在該板上的位置與使用部位。"""
+    target：已知（亮燈）的箭頭，改為計算腳在該板上的位置與使用部位。
+    DP：依腳的位置（或亮燈的板）選台，換到該台的局部座標用 SP 判定，再加上台的前綴。"""
+    if lay['mode'] == 'dp':
+        return _classify_foot_dp(hp, tp, eh, et, target, heel_up, lay)
     foot = _foot_samples(hp, tp, eh, et)
     ts = np.linspace(0, 1, len(foot))
     cells = [(int(np.round(x)), int(np.round(y))) if max(abs(x), abs(y)) <= 1.5 else None for x, y in foot]
@@ -501,18 +549,43 @@ def classify_foot(hp, tp, eh=0.0, et=0.0, target=None, from_ext=True, heel_up=Fa
     return out
 
 
-def fit_foot_and_grid(samples, pts, refine_grid=True, offset=(0.0, 0.0)):
+def _classify_foot_dp(hp, tp, eh, et, target, heel_up, lay):
+    hp, tp = np.asarray(hp, float), np.asarray(tp, float)
+    if target is not None:
+        p = target[0]                                   # '1P←' → '1'
+    else:
+        p = _dp_pad_of(((hp + tp) / 2)[0], lay)
+    cx = lay['arrows'][p + 'D'][0]
+    sh = np.array([cx, 0.0])
+    loc_target = target[2:] if target is not None else None
+    out = classify_foot(hp - sh, tp - sh, eh, et, target=loc_target, heel_up=heel_up)
+    for k in ('heel_ext', 'toe_ext', 'pad'):
+        if out.get(k) is not None and out[k][0] is not None:
+            out[k] = [_r(out[k][0] + cx), out[k][1]]
+    pn = out.get('panel')
+    if pn in ARROW_SYM.values():
+        out['panel'] = f'{p}P{pn}'
+    elif pn == '板外' and target is None:
+        # 兩台之間的空隙（腳的中點落在兩台內緣之間）
+        mx = ((hp + tp) / 2)[0]
+        if abs(mx) < lay['gap'] - 1.5 + 0.25:
+            out['panel'] = '台間'
+    return out
+
+
+def fit_foot_and_grid(samples, pts, refine_grid=True, offset=(0.0, 0.0), lay=SP_LAYOUT):
     """以亮燈步為標準答案：網格搜尋腳跟／腳尖延伸量；自動校正時再以座標下降微調四個箭頭點
     （每點最多移動 0.3 格）。回傳 (eh, et, pts, [調整前一致率, 調整後一致率])。"""
     heels = np.array([s_[0] for s_ in samples]); toes = np.array([s_[1] for s_ in samples])
     syms = [s_[2] for s_ in samples]
-    sym2k = {sym: i for i, sym in enumerate(ARROW_SYM[k] for k in 'LDUR')}
+    keys = lay['keys']
+    sym2k = {sym: i for i, sym in enumerate(lay['sym'][k] for k in keys)}
     lit = np.array([sym2k[x] for x in syms])
-    centers = np.array([ARROWS[k] for k in 'LDUR'])
+    centers = np.array([lay['arrows'][k] for k in keys])
     ts = np.linspace(0, 1, 9)
 
     def score(P, eh, et):
-        H = _h_from_points(P)
+        H = _h_from_points(P, lay)
         hp, tp = _apply_h(H, heels) + offset, _apply_h(H, toes) + offset
         v = tp - hp
         a, b = hp - eh * v, tp + et * v
@@ -522,7 +595,7 @@ def fit_foot_and_grid(samples, pts, refine_grid=True, offset=(0.0, 0.0)):
             dinf = np.maximum(np.abs(F[..., 0] - c[0]), np.abs(F[..., 1] - c[1]))
             cnt.append((dinf <= 0.5).sum(1))
             soft.append((1 / (1 + np.exp((dinf - 0.5) / 0.05))).mean(1))
-        cnt = np.array(cnt).T; soft = np.array(soft).T                    # (m, 4)
+        cnt = np.array(cnt).T; soft = np.array(soft).T                    # (m, 箭頭數)
         pred = np.where(cnt.max(1) > 0, cnt.argmax(1), -1)
         agree = (pred == lit)
         return agree.sum() + 0.05 * soft[np.arange(len(lit)), lit].sum(), agree.mean()
@@ -537,19 +610,20 @@ def fit_foot_and_grid(samples, pts, refine_grid=True, offset=(0.0, 0.0)):
                     best = (sc, float(eh), float(et), ag)
         return best
 
-    P0 = {k: np.asarray(v, float) for k, v in pts.items() if k in 'LDUR'}
+    P0 = {k: np.asarray(v, float) for k, v in pts.items() if k in keys}
     agree0 = score(P0, 0.0, 0.0)[1]
     _, eh, et, _ = best_ext(P0)
     P = {k: v.copy() for k, v in P0.items()}
     if refine_grid:
-        panel_px = np.linalg.norm(P0['U'] - P0['D']) / 2
+        panel_px = (np.linalg.norm(P0['U'] - P0['D']) / 2 if lay['mode'] != 'dp' else
+                    np.mean([np.linalg.norm(P0[p + 'U'] - P0[p + 'D']) / 2 for p in '12']))
         lim = 0.3 * panel_px
         for _round in range(2):
             for step in (0.08 * panel_px, 0.04 * panel_px, 0.02 * panel_px):
                 cur = score(P, eh, et)[0]
                 for _ in range(8):
                     improved = False
-                    for k in 'LDUR':
+                    for k in keys:
                         for d in range(2):
                             for sgn in (1, -1):
                                 Q = {kk: vv.copy() for kk, vv in P.items()}
@@ -702,6 +776,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         else:
             view = {'mode': 'homography'} if pts else {'mode': 'none'}
 
+    lay = SP_LAYOUT
     vp = _load_vertical(vid_dir, Mot, meta)
 
     # 腳跟離地：估計高度，並把腳跟的投影從「遠處」拉回它正下方的地面
@@ -756,7 +831,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
     to_pad = None
     com_axis = None
     if view['mode'] == 'homography':
-        H = _h_from_points(pts)
+        H = _h_from_points(pts, lay)
         to_pad = lambda q: _apply_h(H, q)
         # 單一鏡頭只能量到重心在「畫面水平方向」的位置；沿畫面垂直線移動（深度）量不到。
         # 在踏板中心附近，把畫面垂直方向換到踏板座標，得到量不到的方向 w，可觀測軸 = w 的垂直方向。
@@ -830,7 +905,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             st['heel_pad'] = [_r(q[1][0]), _r(q[1][1])]
             st['toe_pad'] = [_r(q[2][0]), _r(q[2][1])]
             if view['mode'] == 'homography':
-                st.update(classify_foot(q[1], q[2], *foot_ext, heel_up=hup))
+                st.update(classify_foot(q[1], q[2], *foot_ext, heel_up=hup, lay=lay))
             else:
                 x, y = p
                 if abs(y) > 1.5:
@@ -851,10 +926,10 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
     if view['mode'] == 'homography' and (vid_dir / 'preview.mp4').exists():
         from .glow import glow_map, lit_at_step, light_onsets, panel_lights
         Fg, gs, Fr_glow = glow_map(vid_dir, Mot, meta['width'], play)
-        lights = panel_lights(Fr_glow, gs, np.linalg.inv(_h_from_points(pts)))
+        lights = panel_lights(Fr_glow, gs, np.linalg.inv(_h_from_points(pts, lay)), lay)
         for st in steps:
             fp = [st['heel_pad'], st['toe_pad']] if st.get('heel_pad') and st['heel_pad'][0] is not None else None
-            st['lit'] = lit_at_step(lights, st['frame'], fp)
+            st['lit'] = lit_at_step(lights, st['frame'], fp, lay=lay)
         lit_idx = [i for i, st in enumerate(steps) if st['lit']]
         if stage == 1 and len(lit_idx) >= 20:
             # 用亮燈（機台判定的板）搜尋腳部點離地高度：0–10 cm，取與亮燈最一致的
@@ -864,7 +939,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                 for i in lit_idx:
                     hr, tr, _ = contact_ref(contacts[i], h_try)
                     smp.append((hr, tr, steps[i]['lit']))
-                _, _, _, fit_h = fit_foot_and_grid(smp, pts, refine_grid=False, offset=foot_off)
+                _, _, _, fit_h = fit_foot_and_grid(smp, pts, refine_grid=False, offset=foot_off, lay=lay)
                 if best_h is None or fit_h[1] > best_h[1] + 0.5:
                     best_h = (h_try, fit_h[1])
             sole_h = best_h[0]
@@ -872,7 +947,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             for i in lit_idx:
                 hr, tr, _ = contact_ref(contacts[i], sole_h)
                 samples.append((hr, tr, steps[i]['lit']))
-            eh, et, pts2, fit = fit_foot_and_grid(samples, pts, refine_grid=source != 'manual', offset=foot_off)
+            eh, et, pts2, fit = fit_foot_and_grid(samples, pts, refine_grid=source != 'manual', offset=foot_off, lay=lay)
             cal2 = {**calib, 'points': {k: v.tolist() for k, v in pts2.items()}, '_foot_ext': [eh, et],
                     '_fit': fit, '_stage': 2, '_sole_h': sole_h}
             return analyze(vid_dir, cal2, _swap_all=_swap_all)
@@ -881,10 +956,10 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             st['pose_panel'] = st.get('panel')
             if st['lit'] and st.get('heel_pad') and st['heel_pad'][0] is not None:
                 st.update(classify_foot(st['heel_pad'], st['toe_pad'], *foot_ext, target=st['lit'],
-                                        heel_up=st.get('heel_up', False)))
+                                        heel_up=st.get('heel_up', False), lay=lay))
         # 有亮燈但骨架沒抓到落地 → 補一步（歸給離那塊板最近的腳）
         for fi, k in light_onsets(lights):
-            sym = ARROW_SYM[k]
+            sym = lay['sym'][k]
             if any(st.get('lit') == sym and abs(st['frame'] - fi) <= 6 for st in steps):
                 continue
             best = None
@@ -896,7 +971,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                     continue
                 q = to_pad(_warp(Mot[[fi, fi]], np.array([hl, tp]))) + foot_off
                 foot = _foot_samples(q[0], q[1], *foot_ext)
-                cx, cy = ARROWS[k]
+                cx, cy = lay['arrows'][k]
                 d = float(np.min(np.maximum(np.abs(foot[:, 0] - cx), np.abs(foot[:, 1] - cy))))
                 if best is None or d < best[0]:
                     best = (d, side_, q)
@@ -913,7 +988,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                       heel_pad=[_r(q[0][0]), _r(q[0][1])], toe_pad=[_r(q[1][0]), _r(q[1][1])],
                       lit=sym, pose_panel=None, from_light=True,
                       heel_lift=_r(h_, 1), heel_up=hup, _yaw_ok=yaw_ok, _agree=agree, _pitch=pm_, _ank=am_)
-            st.update(classify_foot(q[0], q[1], *foot_ext, target=sym, heel_up=hup))
+            st.update(classify_foot(q[0], q[1], *foot_ext, target=sym, heel_up=hup, lay=lay))
             steps.append(st)
             n_light_only += 1
         if stage == 0 and len(lit_idx) >= 20:  # (亮燈補步之後才算，樣本較多)
@@ -924,7 +999,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                     groups.setdefault(f"{st['foot']}{st['lit']}", []).append((st['_pitch'], st['_ank']))
             hb = {k: [float(np.percentile([x[0] for x in v], 20)), float(np.nanpercentile([x[1] for x in v], 20))]
                   for k, v in groups.items() if len(v) >= 8}
-            cal1 = {**(calib or {}), 'points': {k: np.asarray(v).tolist() for k, v in pts.items() if k in 'LDUR'},
+            cal1 = {**(calib or {}), 'points': {k: np.asarray(v).tolist() for k, v in pts.items() if k in lay['keys']},
                     '_source': source, '_stage': 1, '_heel_base': hb,
                     '_contact_panel': {f"{st['foot']}:{st['frame']}": st['lit'] for st in steps
                                        if st.get('lit') and not st.get('from_light')}}
@@ -1037,7 +1112,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         side_view, hold, source, com_mode, play_s=play.sum() / fps)
     _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info)
 
-    grid = _grid_lines(pts, view) if pts is not None else []
+    grid = _grid_lines(pts, view, lay) if pts is not None else []
     result = {
         'id': vid_dir.name, 'meta': meta, 'fps': _r(fps, 2),
         'view': {**view, 'com_axis': [_r(v) for v in com_axis] if com_axis is not None else None,
@@ -1063,7 +1138,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             'foot_pad': {s: _pts(foot_pad[s]) for s in LEG},
             'ground': {s: _pts(g[s]) for s in LEG},
             'M': np.round(Mot.reshape(n, 9), 7).tolist(),
-            'lights': {ARROW_SYM[k]: [_r(v, 2) for v in a] for k, a in lights.items()} if lights else None,
+            'lights': {lay['sym'][k]: [_r(v, 2) for v in a] for k, a in lights.items()} if lights else None,
             'planted': {s: planted[s].astype(int).tolist() for s in LEG},
             'knee': {s: [_r(v, 1) for v in knee[s]] for s in LEG},
             'arm_est': {s: arm_est[s].astype(int).tolist() for s in LEG},
@@ -1158,16 +1233,17 @@ def _pts(a):
     return [[_r(p[0], 3), _r(p[1], 3)] if np.isfinite(p).all() else None for p in a]
 
 
-def _grid_lines(pts, view):
-    """踏板格線在畫面上的位置（給介面疊圖）。"""
+def _grid_lines(pts, view, lay=SP_LAYOUT):
+    """踏板格線在畫面上的位置（給介面疊圖）。DP 時兩台各畫一組九宮格。"""
     if view['mode'] != 'homography':
         return []
-    Hinv = np.linalg.inv(_h_from_points(pts))
+    Hinv = np.linalg.inv(_h_from_points(pts, lay))
     lines = []
-    for v in (-1.5, -0.5, 0.5, 1.5):
-        s = np.linspace(-1.5, 1.5, 13)
-        for q in (np.c_[np.full_like(s, v), s], np.c_[s, np.full_like(s, v)]):
-            lines.append([[_r(p[0], 1), _r(p[1], 1)] for p in _apply_h(Hinv, q)])
+    for cx in ((0.0,) if lay['mode'] != 'dp' else (-lay['gap'], lay['gap'])):
+        for v in (-1.5, -0.5, 0.5, 1.5):
+            s = np.linspace(-1.5, 1.5, 13)
+            for q in (np.c_[np.full_like(s, v) + cx, s], np.c_[s + cx, np.full_like(s, v)]):
+                lines.append([[_r(p[0], 1), _r(p[1], 1)] for p in _apply_h(Hinv, q)])
     return lines
 
 
