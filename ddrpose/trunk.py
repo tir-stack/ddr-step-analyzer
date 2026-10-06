@@ -7,6 +7,9 @@
   手腕外展：信心中（畫面外或被遮住的手已排除）
   扭轉：信心低（肩寬／骨盆寬的「看起來」比例，會受站位與鏡頭角度影響，只適合看相對變化）
   台移動時上半身延遲：信心中（只用可觀測軸的分量，可觀測軸不接近左右時不計）
+注意：「左右傾斜」其實是沿畫面水平方向量的。斜後方拍攝時這個方向在踏板上不是純左右（見 trunk_axis），
+前傾／後仰也會混進來（例：軸為右後↔左前時，往前傾會被讀成往左）。輔助判斷：
+  肩線傾斜（sh_tilt）幾乎不受前傾影響；體幹看起來變短（trunk_len_dev_pct < 0）通常代表前傾。
 
 DP 區間（每幀）：'1'＝P1 台、'2'＝P2 台、'c'＝中央（跨兩台站 ≥ CENTER_MIN_S 秒）、'm'＝移動中。
 """
@@ -17,7 +20,7 @@ import numpy as np
 CENTER_MIN_S = 0.8          # 跨兩台站超過這個時間才算「中央」站位，否則是移動途中
 REGIONS = ('1', '2', 'm', 'c')
 CONF = {'lean': 'medium', 'sh_tilt': 'medium', 'head_off': 'medium-low', 'wrist': 'medium',
-        'twist': 'low', 'move_lag': 'medium'}
+        'twist': 'low', 'trunk_len': 'low', 'move_lag': 'medium'}
 
 
 def _r(x, d=3):
@@ -129,8 +132,9 @@ def trunk_series(X, S, rel, vp, right_img, arm_est, vert_dir):
         good = base & ok(j) & ~np.asarray(arm_est[s_], bool)
         wr[s_] = np.where(good, d, np.nan)
     bad = ~base
+    tlen = np.linalg.norm(tv, axis=1) / (shw + hpw + 1e-6)          # 體幹看起來的長度（以肩寬＋骨盆寬正規化）
     out = {'lean': lean, 'sh_tilt': sh_tilt, 'twist': twist, 'head_off': np.where(head_ok, head_off, np.nan),
-           'wrist_L': wr['L'], 'wrist_R': wr['R']}
+           'wrist_L': wr['L'], 'wrist_R': wr['R'], 'trunk_len': tlen}
     for k in out:
         out[k] = np.where(bad, np.nan, out[k])
     return out
@@ -140,18 +144,22 @@ def summarize(series, region, play, dp):
     """區間別中位數。SP 只有 'all'；DP 為 '1'／'2'／'m'／'c'（樣本少於 15 幀的區間不列）。"""
     tw = series['twist'][play & np.isfinite(series['twist'])]
     tw_base = float(np.median(tw)) if len(tw) else np.nan
+    tl = series['trunk_len'][play & np.isfinite(series['trunk_len'])]
+    tl_base = float(np.median(tl)) if len(tl) else np.nan
     groups = {'all': play} if not dp else {g: play & (region == g) for g in REGIONS}
     out = {}
     for g, m in groups.items():
         if m.sum() < 15:
             continue
         row = {'frames': int(m.sum())}
-        for k in ('lean', 'sh_tilt', 'head_off', 'wrist_L', 'wrist_R', 'twist'):
+        for k in ('lean', 'sh_tilt', 'head_off', 'wrist_L', 'wrist_R', 'twist', 'trunk_len'):
             v = series[k][m]
             v = v[np.isfinite(v)]
             row[k] = _r(np.median(v), 3 if k not in ('lean', 'sh_tilt') else 1) if len(v) >= 10 else None
         if row.get('twist') is not None and np.isfinite(tw_base):
             row['twist_dev_pct'] = _r((row['twist'] / tw_base - 1) * 100, 1)
+        if row.get('trunk_len') is not None and np.isfinite(tl_base):
+            row['trunk_len_dev_pct'] = _r((row['trunk_len'] / tl_base - 1) * 100, 1)
         out[g] = row
     return out, _r(tw_base)
 

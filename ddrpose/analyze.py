@@ -1133,7 +1133,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             com_obs = com_obs - ctr * com_axis[0]
 
     # ── 體幹指標（只在看得到踏板時計算：需要踏板的左右方向） ──
-    trunk_sum, trunk_tw_base, trunk_ser, pad_moves = None, None, None, []
+    trunk_sum, trunk_tw_base, trunk_ser, pad_moves, trunk_axis = None, None, None, [], None
     if view['mode'] == 'homography':
         hip_ref = np.full((n, 2), np.nan)
         okh = ~np.isnan(hip_g).any(1)
@@ -1148,6 +1148,14 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         right_img = np.c_[_interp_nan(right_img[:, 0].copy()), _interp_nan(right_img[:, 1].copy())]
         if np.isfinite(right_img).all():
             trunk_ser = TR.trunk_series(X, S, rel, vp, right_img, arm_est, _vert_dir)
+            # 各台（SP 為踏板中心）在畫面水平方向能量到的踏板方向：(x, y)，x > 0；y 越大，前後混入越多
+            trunk_axis = {}
+            for g_, cx_ in ((('all', 0.0),) if lay['mode'] != 'dp' else (('1', -lay['gap']), ('2', lay['gap']))):
+                ci = _apply_h(Hinv_, [[cx_, 0.0]])[0]
+                w_ = _apply_h(H, [ci + _vert_dir(ci, vp) * 20])[0] - np.array([cx_, 0.0])
+                a_ = np.array([w_[1], -w_[0]]) / (np.linalg.norm(w_) + 1e-9)
+                a_ = a_ if a_[0] > 0 else -a_
+                trunk_axis[g_] = [_r(a_[0]), _r(a_[1])]
             trunk_sum, trunk_tw_base = TR.summarize(trunk_ser, region if region is not None else np.full(n, None, object),
                                                     play, region is not None)
         if region is not None and com_axis is not None:
@@ -1169,7 +1177,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         side_view, hold, source, com_mode, play_s=play.sum() / fps, lay=lay)
     _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info, lay=lay)
     if trunk_sum:
-        _trunk_advice(metrics, advice, trunk_sum, trunk_tw_base, pad_moves, lay)
+        _trunk_advice(metrics, advice, trunk_sum, trunk_tw_base, pad_moves, lay, trunk_axis)
 
     grid = _grid_lines(pts, view, lay) if pts is not None else []
     result = {
@@ -1411,10 +1419,19 @@ def _lr(v, pos=('右', '右'), neg=('左', '左')):
     return pos if v > 0 else neg
 
 
-def _trunk_advice(M, A, T, tw_base, moves, lay):
-    """體幹指標的建議。T：區間別中位數（trunk.summarize）。"""
+def _axis_mix(ax):
+    """可觀測軸 (x, y) → 偏離純左右的角度（°）與「往右」同方向的前後（後／前）。"""
+    if not ax:
+        return None, None
+    ang = float(np.degrees(np.arctan2(abs(ax[1]), abs(ax[0]))))
+    return ang, (('後', '後ろ') if ax[1] > 0 else ('前', '前'))
+
+
+def _trunk_advice(M, A, T, tw_base, moves, lay, axis=None):
+    """體幹指標的建議。T：區間別中位數（trunk.summarize）。axis：各台在畫面水平方向能量到的踏板方向。"""
     M['trunk'] = T
     M['trunk_twist_base'] = tw_base
+    M['trunk_axis'] = axis
     from .trunk import CONF
     M['trunk_conf'] = CONF
     dp = lay['mode'] == 'dp'
@@ -1466,9 +1483,21 @@ def _trunk_advice(M, A, T, tw_base, moves, lay):
             to_c = (r['lean'] < 0) == (g == '2')          # P2 往左／P1 往右＝往中央
             dz = '往中央' if to_c else '往外側'
             dj = '中央側へ' if to_c else '外側へ'
+            ang, bk = _axis_mix((axis or {}).get(g))
+            fw = (('前', '前') if bk == ('後', '後ろ') else ('後', '後ろ')) if bk else None
+            mix = (('', '') if ang is None or ang < 15 else
+                   (f'這台的「左右」量測方向偏離純左右約 {ang:.0f}°，往{"左" if r["lean"] < 0 else "右"}的讀數也可能有一部分是往{fw[0] if r["lean"] < 0 else bk[0]}傾。',
+                    f'この台での「左右」の測定方向は純粋な左右から約 {ang:.0f}° ずれているため、{"左" if r["lean"] < 0 else "右"}への値の一部は{fw[1] if r["lean"] < 0 else bk[1]}への傾きの可能性があります。'))
+            sup = ('', '')
+            if r.get('sh_tilt') is not None:
+                sup = (f'肩線（較不受前傾影響）：{_lr(r["sh_tilt"])[0]}肩低 {abs(r["sh_tilt"]):.1f}°',
+                       f'肩ライン（前傾の影響を受けにくい）：{_lr(r["sh_tilt"])[1]}肩下がり {abs(r["sh_tilt"]):.1f}°')
+                if r.get('trunk_len_dev_pct') is not None:
+                    sup = (sup[0] + f'；體幹看起來的長度 {r["trunk_len_dev_pct"]:+.0f}%（變短通常代表前傾）。',
+                           sup[1] + f'。体幹の見かけの長さ {r["trunk_len_dev_pct"]:+.0f}%（短くなるのは前傾のことが多い）。')
             _adv(A, '體幹', 'warn', (f'在{REG_TXT[g][0]}上體幹{dz}傾', f'{REG_TXT[g][1]}では体幹が{dj}傾く'),
-                 (f'P1 台 {P1["lean"]:+.1f}°、P2 台 {P2["lean"]:+.1f}°（＋＝往右），差 {abs(d):.1f}°。' + TRUNK_NOTE[0],
-                  f'P1 台 {P1["lean"]:+.1f}°・P2 台 {P2["lean"]:+.1f}°（＋＝右）で、差は {abs(d):.1f}° です。' + TRUNK_NOTE[1]),
+                 (f'P1 台 {P1["lean"]:+.1f}°、P2 台 {P2["lean"]:+.1f}°（＋＝往右），差 {abs(d):.1f}°。' + mix[0] + sup[0] + TRUNK_NOTE[0],
+                  f'P1 台 {P1["lean"]:+.1f}°・P2 台 {P2["lean"]:+.1f}°（＋＝右）で、差は {abs(d):.1f}° です。' + mix[1] + sup[1] + TRUNK_NOTE[1]),
                  ('只在一台上傾斜，多半是身體想「留在中間」或預備回到另一台；在那一台上刻意把骨盆和肩膀都放到該台中央正上方，'
                   '練習：在那一台慢速踩交替串，確認介面的傾斜值接近另一台。',
                   '片方の台でだけ傾くのは、体が「真ん中に残ろう」としているか、もう一方の台に戻る準備をしていることが多いです。'
