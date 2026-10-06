@@ -43,6 +43,7 @@ def make_layout(mode='sp', gap=DP_GAP):
 
 
 SP_LAYOUT = make_layout('sp')
+DP_KEYS = make_layout('dp')['keys']
 
 # 高階玩家（15 級以上）門檻；[良好上限, 注意上限]，超過注意上限即「需改善」
 TH = {
@@ -750,7 +751,15 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
     foot_ext = tuple((calib or {}).get('_foot_ext', (0.0, 0.0)))
     view = {'mode': 'none'}
     pts = None
-    if len(P) >= 12:
+    dp = (calib or {}).get('mode') == 'dp'
+    if len(P) >= 12 and dp:
+        # DP：只用「看得到踏板」的單應模式（8 個箭頭點）；不做側拍與腳印分群
+        if source != 'auto' and calib.get('points'):
+            pts = {k: np.asarray(v, float) for k, v in calib['points'].items() if k in DP_KEYS}
+            if len(pts) != len(DP_KEYS):
+                pts, source = None, 'auto'
+        view = {'mode': 'homography'} if pts else {'mode': 'none'}
+    elif len(P) >= 12:
         side = _is_side(P, f)
         if source != 'auto' and calib and calib.get('points'):
             # 手動校正，或上一階段自動取得的板位（auto-glow／auto-feet 要沿用，不能在下一階段弄丟）
@@ -776,7 +785,10 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         else:
             view = {'mode': 'homography'} if pts else {'mode': 'none'}
 
-    lay = SP_LAYOUT
+    if dp:
+        lay = make_layout('dp', _fit_gap(pts) if pts is not None else DP_GAP)
+    else:
+        lay = SP_LAYOUT
     vp = _load_vertical(vid_dir, Mot, meta)
 
     # 腳跟離地：估計高度，並把腳跟的投影從「遠處」拉回它正下方的地面
@@ -1060,9 +1072,10 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                 foot_pad[s][m] = to_pad(_warp(Mot[m], gd)) + foot_off
 
     # 單應轉換在遠離踏板處會被放大成離譜的值（例如偵測錯位的幀）→ 超出合理範圍的幀視為無效
-    com_pad[~(np.abs(com_pad) <= 2.5).all(1)] = np.nan
+    gx = lay['gap']                     # DP：x 範圍擴大到兩台
+    com_pad[~((np.abs(com_pad[:, 0]) <= 2.5 + gx) & (np.abs(com_pad[:, 1]) <= 2.5))] = np.nan
     for s in LEG:
-        foot_pad[s][~(np.abs(foot_pad[s]) <= 3.0).all(1)] = np.nan
+        foot_pad[s][~((np.abs(foot_pad[s][:, 0]) <= 3.0 + gx) & (np.abs(foot_pad[s][:, 1]) <= 3.0))] = np.nan
 
     # ── 膝蓋角度（2D） ──
     knee = {}
@@ -1109,8 +1122,8 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
 
     metrics, advice = _metrics_and_advice(
         t, fps, view, steps, swings, com_obs, com_rel, axis_info, hip_h, leg_px / S_glob, knee, planted,
-        side_view, hold, source, com_mode, play_s=play.sum() / fps)
-    _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info)
+        side_view, hold, source, com_mode, play_s=play.sum() / fps, lay=lay)
+    _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info, lay=lay)
 
     grid = _grid_lines(pts, view, lay) if pts is not None else []
     result = {
@@ -1123,7 +1136,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
                  'camera_drift_px': _r(float(np.nanmax(np.linalg.norm(
                      _warp(Mot, np.tile([meta['width'] / 2, meta['height'] * 0.8], (n, 1)))
                      - [meta['width'] / 2, meta['height'] * 0.8], axis=1))), 1)},
-        'calibration': {'source': source, 'heel_base': heel_base,
+        'calibration': {'source': source, 'heel_base': heel_base, 'mode': lay['mode'], 'gap': _r(lay['gap'], 2),
                         'points': {k: [_r(v[0], 1), _r(v[1], 1)] for k, v in pts.items()} if pts else None,
                         'grid': grid, 'foot_ext': list(foot_ext), 'fit': fit_info,
                         'sole_h': _r(sole_h, 1), 'foot_offset': [_r(foot_off[0]), _r(foot_off[1])],
@@ -1274,7 +1287,7 @@ AUTO_NOTE = ('（這是用腳印分群做的自動校正：落點是和自己的
              '（足跡クラスタによる自動補正のため、ずれは自分の平均着地点との比較です。矢印の中心からの絶対的なずれを見るには手動補正してください）')
 
 
-def _heel_and_event_advice(M, A, steps, events, ev_stats, axis):
+def _heel_and_event_advice(M, A, steps, events, ev_stats, axis, lay=SP_LAYOUT):
     order = {'bad': 0, 'warn': 1, 'info': 2, 'good': 3}
     # 腳跟離地（只算中／高信心）
     conf = [s for s in steps if s.get('conf') in ('high', 'medium') and s.get('heel_lift') is not None]
@@ -1283,7 +1296,7 @@ def _heel_and_event_advice(M, A, steps, events, ev_stats, axis):
         per = {}
         for s in conf:
             k = s.get('panel')
-            if k in ARROW_SYM.values():
+            if k in lay['sym'].values():
                 per.setdefault(k, []).append(s['heel_up'])
         M['heel_up_pct'] = _r(100 * np.mean([s['heel_up'] for s in conf]), 1)
         M['heel_up_by_arrow'] = {k: dict(n=len(v), pct=_r(100 * np.mean(v), 1)) for k, v in per.items() if len(v) >= 5}
@@ -1337,7 +1350,7 @@ def _axis_names(a):
 
 
 def _metrics_and_advice(t, fps, view, steps, swings, com_obs, com_rel, axis, hip_h, leg_ratio, knee,
-                        planted, side_view, hold, source, com_mode, play_s=None):
+                        planted, side_view, hold, source, com_mode, play_s=None, lay=SP_LAYOUT):
     M, A = {}, []
     dur = float(play_s) if play_s is not None else (float(t[-1] - t[0]) if len(t) > 1 else 0)
     M['duration_s'] = _r(dur, 1)
@@ -1479,18 +1492,19 @@ def _metrics_and_advice(t, fps, view, steps, swings, com_obs, com_rel, axis, hip
             for s in st:
                 cnt[s['panel']] = cnt.get(s['panel'], 0) + 1
             M['panel_counts'] = cnt
-            off = sum(v for k, v in cnt.items() if k in ('角落', '板外')) / len(st) * 100
+            off = sum(v for k, v in cnt.items() if k in ('角落', '板外', '台間')) / len(st) * 100
             M['offpanel_pct'] = _r(off, 1)
-            arrow_steps = [s for s in st if s['panel'] in ARROW_SYM.values()]
+            arrow_steps = [s for s in st if s['panel'] in lay['sym'].values()]
             edge = [s for s in arrow_steps if s.get('depth') is not None and s['depth'] < 0.12]
             edge_pct = len(edge) / max(1, len(arrow_steps)) * 100
             M['edge_pct'] = _r(edge_pct, 1)
             spreads = {}
-            for k, sym in ARROW_SYM.items():
+            for k, sym in lay['sym'].items():
                 ps = np.array([s['pad'] for s in arrow_steps if s['panel'] == sym])
                 if len(ps) >= 5:
+                    ak = lay['arrows'][k]
                     spreads[sym] = dict(n=len(ps), spread_cm=_r(float(np.sqrt(np.var(ps, 0).sum())) * PANEL_CM, 1),
-                                        offset=[_r(ps[:, 0].mean() - ARROWS[k][0]), _r(ps[:, 1].mean() - ARROWS[k][1])])
+                                        offset=[_r(ps[:, 0].mean() - ak[0]), _r(ps[:, 1].mean() - ak[1])])
             M['arrow_spread'] = spreads
             lit = [s for s in st if s.get('lit')]
             if len(lit) >= 10:
@@ -1512,7 +1526,7 @@ def _metrics_and_advice(t, fps, view, steps, swings, com_obs, com_rel, axis, hip
                 M['press_part'] = parts
                 M['lit_untouched'] = sum(1 for s in lit if s.get('part') == '未碰到')
                 dz, dj = [], []
-                for arrow in ('←', '↓', '↑', '→'):
+                for arrow in lay['sym'].values():
                     pp = parts.get(arrow)
                     if pp:
                         tot = sum(pp.values())
