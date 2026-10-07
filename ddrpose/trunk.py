@@ -94,11 +94,14 @@ def pad_regions(n, fps, steps, lay):
 
 # ───────────────────────── 體幹逐幀指標 ─────────────────────────
 
-def trunk_series(X, S, rel, vp, right_img, arm_est, vert_dir):
+def trunk_series(X, S, rel, vp, right_img, arm_est, vert_dir, vx=None):
     """逐幀：lean（體幹左右傾斜，°，＋＝往玩家右側）、sh_tilt（肩線相對骨盆線的傾斜，°，＋＝右肩較低）、
     twist（肩寬／骨盆寬，畫面上）、head_off（頭相對肩中點，肩寬為 1，＋＝右）、
     wrist_L／wrist_R（手腕離體幹中線的距離，肩寬為 1，＋＝往外）。
-    right_img：(n,2) 每幀在骨盆附近「玩家右方」的畫面方向。"""
+    right_img：(n,2) 每幀在骨盆附近「玩家右方」的畫面方向。
+    vx：(n,3) 每幀踏板 x 軸（左右）的消失點（齊次，目前幀）。三維中與左右平行的線在畫面上都指向它，
+    所以「水平的左右」在每個點各自是指向 vx 的方向；肩膀比鏡頭高、骨盆接近鏡頭高度時兩者的方向不同，
+    只用骨盆處的方向量肩線，會把透視造成的傾斜誤當成「右肩低」（斜後方、鏡頭在胸口高度時約 5–10°）。"""
     n = len(X)
     ok = lambda j: rel[:, j] & (S[:, j] >= 0.5)
     hipL, hipR, shL, shR = X[:, 11], X[:, 12], X[:, 5], X[:, 6]
@@ -113,16 +116,38 @@ def trunk_series(X, S, rel, vp, right_img, arm_est, vert_dir):
     tv = shm - hip
     lean = np.degrees(np.arctan2((tv * r).sum(1), (tv * up).sum(1)))
 
+    def hdir(p):
+        """點 p 處「三維水平左右」的畫面方向（指向玩家右方）。沒有 vx 時用骨盆處的 r。"""
+        if vx is None:
+            return r
+        w_ = vx[:, 2:3]
+        far = np.abs(w_) < 1e-9
+        d = np.where(far, vx[:, :2], vx[:, :2] / np.where(far, 1.0, w_) - p)
+        d = d / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-9)
+        return np.where(((d * r).sum(1) < 0)[:, None], -d, d)
+
+    def down_at(p):
+        if vp is None:
+            return np.tile([0.0, 1.0], (len(p), 1))
+        d = (np.tile(vp[:2], (len(p), 1)) if abs(vp[2]) < 1e-6 else vp[:2] / vp[2] - p)
+        d = d / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-9)
+        return np.where((d[:, 1] < 0)[:, None], -d, d)
+
     def tilt(a, b):
+        """線 a→b 相對該處水平左右的傾斜（°，＋＝b 側較低）。"""
+        m_ = (a + b) / 2
+        d = hdir(m_)
+        nn = np.c_[-d[:, 1], d[:, 0]]
+        nn = np.where(((nn * down_at(m_)).sum(1) < 0)[:, None], -nn, nn)
         w = b - a
-        return np.degrees(np.arctan2(-(w * up).sum(1), (w * r).sum(1)))
+        return np.degrees(np.arctan2((w * nn).sum(1), (w * d).sum(1)))
     sh_tilt = tilt(shL, shR) - tilt(hipL, hipR)
     shw = np.linalg.norm(shR - shL, axis=1)
     hpw = np.linalg.norm(hipR - hipL, axis=1)
     twist = shw / (hpw + 1e-6)
     head = np.where((rel[:, 17] & (S[:, 17] >= 0.4))[:, None], X[:, 17], (X[:, 3] + X[:, 4]) / 2)
     head_ok = (rel[:, 17] & (S[:, 17] >= 0.4)) | (ok(3) & ok(4))
-    head_off = ((head - shm) * r).sum(1) / (shw + 1e-6)
+    head_off = ((head - shm) * hdir(shm)).sum(1) / (shw + 1e-6)        # 用肩膀高度的水平方向
     nrm = np.c_[-tv[:, 1], tv[:, 0]]
     nrm = nrm / (np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9)
     nrm = np.where(((nrm * r).sum(1) < 0)[:, None], -nrm, nrm)       # 指向玩家右側

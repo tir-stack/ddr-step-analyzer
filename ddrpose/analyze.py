@@ -1147,7 +1147,9 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             right_img[okh] = b_ - a_
         right_img = np.c_[_interp_nan(right_img[:, 0].copy()), _interp_nan(right_img[:, 1].copy())]
         if np.isfinite(right_img).all():
-            trunk_ser = TR.trunk_series(X, S, rel, vp, right_img, arm_est, _vert_dir)
+            # 踏板 x 軸的消失點：參考幀 → 每一幀（肩線等要用各自高度的水平方向）
+            vx = np.einsum('nij,j->ni', np.linalg.inv(Mot), Hinv_ @ np.array([1.0, 0.0, 0.0]))
+            trunk_ser = TR.trunk_series(X, S, rel, vp, right_img, arm_est, _vert_dir, vx=vx)
             # 各台（SP 為踏板中心）在畫面水平方向能量到的踏板方向：(x, y)，x > 0；y 越大，前後混入越多
             trunk_axis = {}
             for g_, cx_ in ((('all', 0.0),) if lay['mode'] != 'dp' else (('1', -lay['gap']), ('2', lay['gap']))):
