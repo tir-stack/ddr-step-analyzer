@@ -1150,6 +1150,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
             # 踏板 x 軸的消失點：參考幀 → 每一幀（肩線等要用各自高度的水平方向）
             vx = np.einsum('nij,j->ni', np.linalg.inv(Mot), Hinv_ @ np.array([1.0, 0.0, 0.0]))
             trunk_ser = TR.trunk_series(X, S, rel, vp, right_img, arm_est, _vert_dir, vx=vx)
+            trunk_ser['facing'], trunk_ser['facing_scr'] = TR.facing_series(n, fps, steps)
             # 各台（SP 為踏板中心）在畫面水平方向能量到的踏板方向：(x, y)，x > 0；y 越大，前後混入越多
             trunk_axis = {}
             for g_, cx_ in ((('all', 0.0),) if lay['mode'] != 'dp' else (('1', -lay['gap']), ('2', lay['gap']))):
@@ -1220,7 +1221,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         result['frames']['region'] = [r_ if r_ in TR.REGIONS else None for r_ in region]
         result['pad_moves'] = pad_moves
     if trunk_ser is not None:
-        result['frames']['trunk'] = {k: [_r(v, 1 if k in ('lean', 'sh_tilt') else 2) for v in a_]
+        result['frames']['trunk'] = {k: [_r(v, 1 if k in ('lean', 'sh_tilt', 'facing', 'facing_scr') else 2) for v in a_]
                                      for k, a_ in trunk_ser.items()}
     (vid_dir / 'analysis.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
     return result

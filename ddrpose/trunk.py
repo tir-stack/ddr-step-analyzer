@@ -19,8 +19,10 @@ import numpy as np
 
 CENTER_MIN_S = 0.8          # 跨兩台站超過這個時間才算「中央」站位，否則是移動途中
 REGIONS = ('1', '2', 'm', 'c')
+SCREEN_Y = -4.0             # 畫面在踏板座標的位置（兩台中間 x=0、踏板中心前方約 4 格≈1.1 m，估）
+FACING_MAX_AGE_S = 1.5      # 腳的朝向用最近一次落地；超過這個時間沒落地就不算
 CONF = {'lean': 'medium', 'sh_tilt': 'medium', 'head_off': 'medium-low', 'wrist': 'medium',
-        'twist': 'low', 'trunk_len': 'low', 'move_lag': 'medium'}
+        'twist': 'low', 'trunk_len': 'low', 'move_lag': 'medium', 'facing': 'medium'}
 
 
 def _r(x, d=3):
@@ -165,6 +167,38 @@ def trunk_series(X, S, rel, vp, right_img, arm_est, vert_dir, vx=None):
     return out
 
 
+def facing_series(n, fps, steps, foot_pts=None):
+    """每幀「身體朝向」：兩隻腳（最近一次落地）腳跟→腳尖單位向量的平均方向（踏板座標，地面上量得到）。
+    回傳 (facing, facing_scr)：facing＝相對正前方（踏板 ↑）的角度，facing_scr＝相對「站的位置→畫面」方向的角度；
+    單位 °，＋＝往右。腳尖外八會互相抵消；只有一隻腳的資料時不算。"""
+    last = {s: [None] * n for s in 'LR'}
+    for s in 'LR':
+        ss = sorted([st for st in steps if st['foot'] == s and st.get('conf') != 'low'
+                     and st.get('heel_pad') and st['heel_pad'][0] is not None
+                     and st.get('toe_pad') and st['toe_pad'][0] is not None], key=lambda st: st['frame'])
+        for a, b in zip(ss, ss[1:] + [None]):
+            f0, f1 = a['frame'], min(b['frame'] if b else n, a['frame'] + int(FACING_MAX_AGE_S * fps))
+            for i in range(f0, min(f1, n)):
+                last[s][i] = a
+    fac, scr = np.full(n, np.nan), np.full(n, np.nan)
+    for i in range(n):
+        a, b = last['L'][i], last['R'][i]
+        if a is None or b is None:
+            continue
+        u = np.zeros(2); mid = np.zeros(2)
+        for st in (a, b):
+            h, tp = np.array(st['heel_pad'], float), np.array(st['toe_pad'], float)
+            d = tp - h
+            if np.linalg.norm(d) < 1e-6:
+                break
+            u += d / np.linalg.norm(d); mid += (h + tp) / 4
+        else:
+            fac[i] = np.degrees(np.arctan2(u[0], -u[1]))
+            sd = np.array([0.0, SCREEN_Y]) - mid
+            scr[i] = (fac[i] - np.degrees(np.arctan2(sd[0], -sd[1])) + 180) % 360 - 180
+    return fac, scr
+
+
 def summarize(series, region, play, dp):
     """區間別中位數。SP 只有 'all'；DP 為 '1'／'2'／'m'／'c'（樣本少於 15 幀的區間不列）。"""
     tw = series['twist'][play & np.isfinite(series['twist'])]
@@ -177,10 +211,12 @@ def summarize(series, region, play, dp):
         if m.sum() < 15:
             continue
         row = {'frames': int(m.sum())}
-        for k in ('lean', 'sh_tilt', 'head_off', 'wrist_L', 'wrist_R', 'twist', 'trunk_len'):
+        for k in ('lean', 'sh_tilt', 'head_off', 'wrist_L', 'wrist_R', 'twist', 'trunk_len', 'facing', 'facing_scr'):
+            if k not in series:
+                continue
             v = series[k][m]
             v = v[np.isfinite(v)]
-            row[k] = _r(np.median(v), 3 if k not in ('lean', 'sh_tilt') else 1) if len(v) >= 10 else None
+            row[k] = _r(np.median(v), 1 if k in ('lean', 'sh_tilt', 'facing', 'facing_scr') else 3) if len(v) >= 10 else None
         if row.get('twist') is not None and np.isfinite(tw_base):
             row['twist_dev_pct'] = _r((row['twist'] / tw_base - 1) * 100, 1)
         if row.get('trunk_len') is not None and np.isfinite(tl_base):

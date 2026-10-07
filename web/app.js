@@ -8,6 +8,7 @@ const COL = { L: css('--L'), R: css('--R'), com: css('--com'), ev: '#f472b6' };
 const PANEL_COL = { '←': css('--aL'), '↓': css('--aD'), '↑': css('--aU'), '→': css('--aR'),
   '中央': '#9ca3af', '中間列': '#9ca3af', '角落': '#f59e0b', '板外': '#ef4444', '台間': '#ef4444' };
 const REGION_COL = { 1: '#38bdf8', 2: '#fb7185', m: '#facc15', c: '#9ca3af' };    // DP 所在台
+const SCREEN_Y = -4.0, FACING_COL = '#22d3ee';   // 畫面位置（踏板座標，同 trunk.SCREEN_Y）、身體朝向箭頭的顏色
 const ARROW_KEYS = { L: '←', D: '↓', U: '↑', R: '→' };
 const ARROW_POS = { L: [-1, 0], D: [0, 1], U: [0, -1], R: [1, 0] };
 const ARROW_COL = { L: css('--aL'), D: css('--aD'), U: css('--aU'), R: css('--aR') };
@@ -506,6 +507,26 @@ function drawPad() {
     const st = stepAt(s, i);
     if (st && st.heel_pad && st.heel_pad[1] != null) drawFootOnPad(g, PF, st, COL[s], 7, 0.9);
   }
+  // 身體朝向（兩腳腳跟→腳尖的平均方向）與「站的位置→畫面」的線
+  if (!side && A.track && A.view.mode === 'homography' && S.layers.feet) {
+    // 角度用後端的值（最近一次落地的兩腳），和下方文字一致；擺動中的補間不算
+    const a = A.track.L[i], b = A.track.R[i], fa = F.trunk && F.trunk.facing ? F.trunk.facing[i] : null;
+    if (a && b && fa != null) {
+      const mx = (a.cx + b.cx) / 2, my = (a.cy + b.cy) / 2, [x0, y0] = PF(mx, my);
+      const sx = -mx, sy = SCREEN_Y - my, sn = Math.hypot(sx, sy) || 1;
+      const [x1, y1] = PF(mx + sx / sn * 1.8, my + sy / sn * 1.8);
+      g.strokeStyle = '#e5e7eb'; g.globalAlpha = 0.85; g.lineWidth = 2; g.setLineDash([6, 4]);
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+      const ux = Math.sin(fa * Math.PI / 180), uy = -Math.cos(fa * Math.PI / 180);
+      {
+        const [x2, y2] = PF(mx + ux * 1.3, my + uy * 1.3), an = Math.atan2(y2 - y0, x2 - x0);
+        g.strokeStyle = FACING_COL; g.fillStyle = FACING_COL; g.lineWidth = 3;
+        g.beginPath(); g.moveTo(x0, y0); g.lineTo(x2, y2); g.stroke();
+        g.beginPath(); g.moveTo(x2, y2); g.lineTo(x2 - 10 * Math.cos(an - 0.45), y2 - 10 * Math.sin(an - 0.45));
+        g.lineTo(x2 - 10 * Math.cos(an + 0.45), y2 - 10 * Math.sin(an + 0.45)); g.closePath(); g.fill();
+      }
+    }
+  }
   if (S.calib && !S.calib.pick) {                          // 目前的手動腳位置偏移
     const [ox, oy] = S.calib.footOff;
     if (Math.hypot(ox, oy) > 0.005) { g.fillStyle = '#facc15'; g.font = `11px ${FONT}`; g.textAlign = 'right';
@@ -680,6 +701,11 @@ function drawNow() {
   if (F.lights) { const on = Ly.keys.filter(k => (F.lights[Ly.sym[k]] || [])[i] > 0.4).map(k => Ly.sym[k]); parts.push(`${t('now.lights')}：<b>${on.join(' ') || '—'}</b>`); }
   if (F.region && F.region[i]) parts.push(`${t('now.region')}：<b>${t('reg.' + F.region[i])}</b>`);
   const TK = F.trunk;
+  if (TK && TK.facing && TK.facing[i] != null) {
+    const fa = TK.facing[i], fs = TK.facing_scr[i];
+    parts.push(`${t('now.facing')} <b>${Math.abs(fa) < 0.5 ? t('now.front') : t(fa > 0 ? 'side.R' : 'side.L') + ' ' + Math.abs(fa).toFixed(0) + '°'}</b>` +
+      (fs != null ? `（${t('now.facingScr', { v: Math.abs(fs) < 0.5 ? t('now.front') : t(fs > 0 ? 'side.R' : 'side.L') + ' ' + Math.abs(fs).toFixed(0) + '°' })}）` : ''));
+  }
   if (TK && TK.lean[i] != null) {
     const ln = TK.lean[i], st_ = TK.sh_tilt[i];
     parts.push(`${t('now.lean')} <b>${t(ln > 0 ? 'side.R' : 'side.L')} ${Math.abs(ln).toFixed(1)}°</b>` +
@@ -789,6 +815,8 @@ function trunkTable(M) {
   const rows = [
     ['tr.lean', g => sgn(T[g].lean, 'side.R', 'side.L', 1, '°'), 'lean'],
     ['tr.shTilt', g => sgn(T[g].sh_tilt, 'tr.rLow', 'tr.lLow', 1, '°'), 'sh_tilt'],
+    ['tr.facing', g => sgn(T[g].facing, 'side.R', 'side.L', 0, '°'), 'facing'],
+    ['tr.facingScr', g => sgn(T[g].facing_scr, 'side.R', 'side.L', 0, '°'), 'facing'],
     ['tr.head', g => sgn(T[g].head_off, 'side.R', 'side.L', 2), 'head_off'],
     ['tr.wristL', g => num(T[g].wrist_L), 'wrist'],
     ['tr.wristR', g => num(T[g].wrist_R), 'wrist'],
@@ -796,7 +824,7 @@ function trunkTable(M) {
     ['tr.len', g => pct(T[g].trunk_len_dev_pct), 'trunk_len'],
     ['tr.frames', g => `${(T[g].frames / (S.A.fps || 30)).toFixed(1)} ${t('u.sec').trim()}`, null],
   ].filter(r => !(T.all && r[0] === 'tr.len'));                 // SP 只有一個區間：相對變化沒有意義
-  if (T.all) rows[5][1] = g => num(T[g].twist);
+  if (T.all) rows.find(r => r[0] === 'tr.twist')[1] = g => num(T[g].twist);
   let html = `<h2 style="margin-top:14px">${t(M.trunk.all ? 'tr.titleSP' : 'tr.titleDP')}</h2><table class="cmp"><tr><th></th>` +
     cols.map(g => `<th>${t('reg.' + g)}</th>`).join('') + `<th>${t('tr.conf')}</th></tr>` +
     rows.map(([k, f, ck]) => `<tr><td>${t(k)}</td>${cols.map(g => `<td>${esc(f(g))}</td>`).join('')}<td class="dim">${ck && C[ck] ? t('conf.' + C[ck]) : ''}</td></tr>`).join('') + '</table>';
@@ -805,7 +833,7 @@ function trunkTable(M) {
     const ang = a => Math.round(Math.atan2(Math.abs(a[1]), Math.abs(a[0])) * 180 / Math.PI);
     html += `<p class="note">${t('tr.axisNote', { a: Object.entries(ax).map(([g, a]) => `${t('reg.' + g)} ${ang(a)}°`).join('・') })}</p>`;
   }
-  html += `<p class="note">${t('tr.note')}</p>`;
+  html += `<p class="note">${t('tr.note')}</p><p class="note">${t('tr.facingNote')}</p>`;
   const PM = M.pad_moves;
   if (PM && PM.n) {
     const d = PM.by_dir || {};
