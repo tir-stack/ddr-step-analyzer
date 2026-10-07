@@ -774,7 +774,7 @@ function renderMetrics() {
   ].filter(r => r[1] != null);
   let html = '<table>' + rows.map(([k, v, u]) => `<tr><td>${k}</td><td>${esc(v)}${u}</td></tr>`).join('') + '</table>';
   if (M.hand_hold) html += `<p class="note">${t('m.hold', { l: M.hand_hold.L ?? '-', r: M.hand_hold.R ?? '-' })}</p>`;
-  html += trunkTable(M);
+  html += trunkTable(M) + lrTable(M);
   $('#tab-metrics').innerHTML = html;
 }
 // 體幹指標：SP 為整段一欄；DP 為 P1 台／P2 台／移動中／中央 的比較表
@@ -815,6 +815,29 @@ function trunkTable(M) {
       <tr><td>${t('pm.trail')}</td><td>${PM.trail_cm != null ? PM.trail_cm + ' cm' : '–'}</td></tr></table>
       <p class="note">${t('pm.note')}</p>`;
   }
+  return html;
+}
+// 左右差：左足／右足／右−左（＋＝右が大きい）と信頼度
+function lrTable(M) {
+  const D = M.lr; if (!D || !D.L || !D.R) return '';
+  const rows = [
+    ['lr.steps', 'steps', 0, '', 1, 'high'],
+    ['lr.heelUp', 'heel_up_pct', 1, '%', 1, 'medium'],
+    ['lr.toe', 'toe_pct', 1, '%', 1, 'medium'],
+    ['lr.heel', 'heel_pct', 1, '%', 1, 'medium'],
+    ['lr.full', 'full_pct', 1, '%', 1, 'medium'],
+    ['lr.knee', 'knee_deg', 1, '°', 1, 'low'],
+    ['lr.stance', 'stance_s', 0, ' ms', 1000, 'medium'],
+    ['lr.lift', 'lift_cm', 1, ' cm', 1, 'medium'],
+  ].filter(r => D.L[r[1]] != null && D.R[r[1]] != null);
+  if (!rows.length) return '';
+  const f = (v, d, u, k) => `${(v * k).toFixed(d)}${u}`;
+  const dlt = (l, r, d, u, k) => { const x = (r - l) * k; return `${x > 0 ? '+' : x < 0 ? '−' : '±'}${Math.abs(x).toFixed(d)}${u === '%' ? ' pt' : u}`; };
+  let html = `<h2 style="margin-top:14px">${t('lr.title')}</h2><table class="cmp"><tr><th></th><th>${t('foot.L')}</th><th>${t('foot.R')}</th><th>${t('lr.diff')}</th><th>${t('tr.conf')}</th></tr>` +
+    rows.map(([k, key, d, u, m, c]) => `<tr><td>${t(k)}</td><td>${f(D.L[key], d, u, m)}</td><td>${f(D.R[key], d, u, m)}</td>` +
+      `<td>${dlt(D.L[key], D.R[key], d, u, m)}</td><td class="dim">${t('conf.' + c)}</td></tr>`).join('') + '</table>';
+  if (D.near) html += `<p class="note">${t('lr.near', { s: t('foot.' + D.near), p: D.near_pct })}</p>`;
+  html += `<p class="note">${t('lr.note')}</p>`;
   return html;
 }
 function renderSteps() {

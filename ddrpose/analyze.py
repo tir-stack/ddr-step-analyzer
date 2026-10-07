@@ -1176,6 +1176,7 @@ def analyze(vid_dir: str | Path, calib: dict | None = None, _swap_all: bool = Fa
         t, fps, view, steps, swings, com_obs, com_rel, axis_info, hip_h, leg_px / S_glob, knee, planted,
         side_view, hold, source, com_mode, play_s=play.sum() / fps, lay=lay)
     _heel_and_event_advice(metrics, advice, steps, events, ev_stats, axis_info, lay=lay)
+    metrics['lr'] = _lr_table(steps, swings, knee, planted, shank, play)
     if trunk_sum:
         _trunk_advice(metrics, advice, trunk_sum, trunk_tw_base, pad_moves, lay, trunk_axis)
 
@@ -1407,6 +1408,33 @@ def _heel_and_event_advice(M, A, steps, events, ev_stats, axis, lay=SP_LAYOUT):
               '大きな踏み替え（←→・↑↓）では足だけを出して骨盤は中央に残す。同じ足で続けてパネルを変えるときは、'
               '反対の足でしっかり体重を支えてから動かします。'))
     A.sort(key=lambda a: order[a['level']])
+
+
+def _lr_table(steps, swings, knee, planted, shank, play):
+    """左右腳使用方式的比較（整段）：{L: {...}, R: {...}, near, near_pct}。
+    斜角鏡頭下離鏡頭近的那隻腳看起來較大、角度也會有偏差，所以另外記錄哪隻腳離鏡頭近（小腿在畫面上較長）。"""
+    def med(a, d):
+        a = np.asarray(a, float)
+        a = a[np.isfinite(a)]
+        return _r(np.median(a), d) if len(a) >= 5 else None
+    out = {}
+    for s in LEG:
+        ss = [x for x in steps if x['foot'] == s]
+        cf = [x for x in ss if x.get('conf') in ('high', 'medium') and x.get('heel_lift') is not None]
+        parts = [x['part'] for x in ss if x.get('lit') and x.get('part') in ('腳尖', '腳跟', '全腳', '腳掌中段')]
+        pp = (lambda k: _r(100 * parts.count(k) / len(parts), 1)) if len(parts) >= 10 else (lambda k: None)
+        out[s] = dict(steps=len(ss),
+                      heel_up_pct=_r(100 * np.mean([x['heel_up'] for x in cf]), 1) if len(cf) >= 10 else None,
+                      lift_cm=med([w['lift_cm'] for w in swings if w['foot'] == s and w['lift_cm'] is not None], 1),
+                      knee_deg=med(knee[s][planted[s] & play], 1),
+                      stance_s=med([x['dur'] for x in ss if x.get('dur') is not None], 3),
+                      toe_pct=pp('腳尖'), heel_pct=pp('腳跟'), full_pct=pp('全腳'),
+                      shank_px=med(shank[s][play], 1))
+    a, b = out['L']['shank_px'], out['R']['shank_px']
+    if a and b:
+        out['near'] = 'L' if a > b else 'R'
+        out['near_pct'] = _r((max(a, b) / min(a, b) - 1) * 100, 1)
+    return out
 
 
 REG_TXT = {'all': ('整段', '全体'), '1': ('P1 台', 'P1 台'), '2': ('P2 台', 'P2 台'),
